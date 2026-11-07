@@ -1,0 +1,13 @@
+{
+  "name": "relay-mvp",
+  "version": "0.1.0",
+  "description": "Relay webhook delivery MVP - working demo of durable event fan-out, retries and dead-lettering",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
