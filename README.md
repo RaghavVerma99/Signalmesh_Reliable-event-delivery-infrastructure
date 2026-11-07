@@ -1,7 +1,7 @@
-# Relay MVP
+# SignalMesh MVP
 
-Small working demo of **Relay** - a webhook event delivery platform.
-Full design: [`RELAY_SPEC.md`](./RELAY_SPEC.md)
+Small working demo of **SignalMesh** - a webhook event delivery platform.
+Full design: [`SIGNALMESH_SPEC.md`](./SIGNALMESH_SPEC.md)
 
 ## What this MVP does
 

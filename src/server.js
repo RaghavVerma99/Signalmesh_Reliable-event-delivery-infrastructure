@@ -52,11 +52,11 @@ app.use('/v1', (req, res, next) => {
 });
 
 app.get('/healthz', (req, res) => {
-  res.json({ status: 'ok', service: 'relay-mvp' });
+  res.json({ status: 'ok', service: 'signalmesh' });
 });
 
 app.get('/readyz', (req, res) => {
-  res.json({ status: 'ok', service: 'relay-mvp' });
+  res.json({ status: 'ok', service: 'signalmesh' });
 });
 
 app.post('/v1/keys', (req, res) => {
@@ -64,7 +64,7 @@ app.post('/v1/keys', (req, res) => {
   const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : 'default';
   const created = store.createKey(name);
   log('info', 'api_key_created', { key_id: created.id, name: created.name });
-  return res.status(201).json({ key: created, note: 'Store this key now. Relay only stores its hash.' });
+  return res.status(201).json({ key: created, note: 'Store this key now. SignalMesh only stores its hash.' });
 });
 
 app.post('/v1/events', (req, res) => {
@@ -302,11 +302,11 @@ function recordHit(path) {
 }
 
 app.post('/demo/orders', (req, res) => {
-  const deliveryId = req.headers['x-relay-delivery-id'];
+  const deliveryId = req.headers['x-signalmesh-delivery-id'];
   const delivery = store.state.deliveries.find((d) => d.id === deliveryId) || null;
   const secret = delivery ? (store.state.endpoints.find((e) => e.id === delivery.endpointId) || {}).signingSecret : null;
-  const expectedSig = 'v1=' + crypto.createHmac('sha256', secret || 'whsec_missing').update(String(req.headers['x-relay-timestamp']) + '.' + JSON.stringify(req.body)).digest('hex');
-  const sig = String(req.headers['x-relay-signature'] || '');
+  const expectedSig = 'v1=' + crypto.createHmac('sha256', secret || 'whsec_missing').update(String(req.headers['x-signalmesh-timestamp']) + '.' + JSON.stringify(req.body)).digest('hex');
+  const sig = String(req.headers['x-signalmesh-signature'] || '');
   const ok = !!secret && sig === expectedSig;
   if (!ok) {
     return res.status(401).json({ error: 'invalid_signature' });

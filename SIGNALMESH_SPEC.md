@@ -1,4 +1,4 @@
-# Relay
+﻿# SignalMesh
 
 ## Technical Product Requirements & System Design Specification
 
@@ -17,26 +17,26 @@ and contributors
 
 # 1. Executive Summary
 
-Relay is a self-hostable webhook event delivery platform. It accepts
+SignalMesh is a self-hostable webhook event delivery platform. It accepts
 events from producer applications, persists them durably, fans them out
 to configured HTTP endpoints, retries transient failures, records
 delivery attempts, and provides replay and inspection capabilities.
 
-Relay addresses a recurring integration problem: applications need to
+SignalMesh addresses a recurring integration problem: applications need to
 notify other systems when business events occur, but remote endpoints
 can be unavailable, slow, rate-limited, misconfigured, or unreliable. A
 basic HTTP request from one service to another is not sufficient when
 the sender needs durable delivery, retry control, observability, and
 operational recovery.
 
-Relay is designed as a focused, developer-oriented infrastructure
+SignalMesh is designed as a focused, developer-oriented infrastructure
 product. Its core promise is:
 
 > Accept an event durably, attempt delivery according to an explicit
 > policy, preserve an auditable delivery history, and give operators
 > safe tools to inspect and recover failures.
 
-Relay does **not** promise exactly-once delivery over HTTP. The initial
+SignalMesh does **not** promise exactly-once delivery over HTTP. The initial
 delivery guarantee is **at-least-once**, subject to configured retry
 limits and retention policies. Consumers must use event identifiers and
 idempotent processing to avoid duplicate business effects.
@@ -70,7 +70,7 @@ idempotent processing to avoid duplicate business effects.
 -   Multi-region active-active deployment.
 -   Enterprise SSO, complex billing, or advanced organization hierarchy.
 -   A hosted multi-tenant SaaS control plane in the first milestone.
--   Guaranteed delivery when Relay's own durable storage is permanently
+-   Guaranteed delivery when SignalMesh's own durable storage is permanently
     lost.
 
 ------------------------------------------------------------------------
@@ -81,10 +81,10 @@ idempotent processing to avoid duplicate business effects.
   Term                                Definition
   ----------------------------------- -----------------------------------
   Producer                            Application that sends an event to
-                                      Relay.
+                                      SignalMesh.
 
   Event                               Immutable business fact submitted
-                                      to Relay, such as
+                                      to SignalMesh, such as
                                       `payment.succeeded`.
 
   Endpoint                            Destination HTTP URL registered to
@@ -93,7 +93,7 @@ idempotent processing to avoid duplicate business effects.
   Subscription                        Association between an endpoint and
                                       one or more event types.
 
-  Delivery                            Relay's attempt lifecycle for
+  Delivery                            SignalMesh's attempt lifecycle for
                                       sending one event to one endpoint.
 
   Attempt                             One individual HTTP request made
@@ -124,7 +124,7 @@ idempotent processing to avoid duplicate business effects.
                                       crashes.
 
   Tenant                              An isolated customer or
-                                      organization using a Relay
+                                      organization using a SignalMesh
                                       installation.
   -----------------------------------------------------------------------
 
@@ -136,14 +136,14 @@ idempotent processing to avoid duplicate business effects.
 
 ### Application developer
 
--   Integrates Relay into an application.
+-   Integrates SignalMesh into an application.
 -   Creates endpoints and subscriptions.
 -   Sends business events.
 -   Needs clear API responses and SDK/CLI support.
 
 ### Backend/platform engineer
 
--   Operates Relay.
+-   Operates SignalMesh.
 -   Investigates failed deliveries.
 -   Adjusts retry policies and rate limits.
 -   Needs metrics, logs, and reliable recovery.
@@ -158,7 +158,7 @@ idempotent processing to avoid duplicate business effects.
 ## 3.2 Core use cases
 
 1.  A payment service submits `payment.succeeded`.
-2.  Relay stores the event and creates one delivery per matching
+2.  SignalMesh stores the event and creates one delivery per matching
     endpoint.
 3.  Workers deliver the event concurrently.
 4.  One endpoint returns HTTP 200 and becomes delivered.
@@ -168,7 +168,7 @@ idempotent processing to avoid duplicate business effects.
 8.  After fixing the destination, the operator replays the delivery.
 9.  A producer retries event ingestion after a network timeout using the
     same idempotency key.
-10. Relay returns the original event result instead of creating a
+10. SignalMesh returns the original event result instead of creating a
     duplicate event.
 
 ------------------------------------------------------------------------
@@ -237,7 +237,7 @@ delivery path is correct and tested.
                        HTTPS / JSON
                               |
                   +-----------v-----------+
-                  |       Relay API       |
+                  |       SignalMesh API       |
                   | Auth / Validation     |
                   | Event Ingestion       |
                   | Endpoint Management   |
@@ -284,8 +284,8 @@ delivery path is correct and tested.
 
 For the MVP, use a modular monolith with two executable processes:
 
-1.  `relay-api`: handles public and administrative HTTP requests.
-2.  `relay-worker`: claims and executes scheduled deliveries.
+1.  `SignalMesh-api`: handles public and administrative HTTP requests.
+2.  `SignalMesh-worker`: claims and executes scheduled deliveries.
 
 Both processes share one PostgreSQL database. They may be deployed as
 separate containers and scaled independently.
@@ -347,7 +347,7 @@ at creation.
 -   Accept JSON event payloads.
 -   Require `event_type`.
 -   Accept optional `data`, `occurred_at`, and metadata.
--   Generate a unique Relay event ID.
+-   Generate a unique SignalMesh event ID.
 -   Enforce configurable request-body size limits.
 -   Validate content type and JSON syntax.
 -   Persist the event before returning success.
@@ -473,10 +473,10 @@ timeout: 10 seconds. - Retry-After: respect within a configured maximum.
 Suggested header format:
 
 ``` text
-Relay-Event-Id: evt_...
-Relay-Delivery-Id: dlv_...
-Relay-Timestamp: 1790000000
-Relay-Signature: v1=<hex_digest>
+SignalMesh-Event-Id: evt_...
+SignalMesh-Delivery-Id: dlv_...
+SignalMesh-Timestamp: 1790000000
+SignalMesh-Signature: v1=<hex_digest>
 ```
 
 Suggested signed message:
@@ -486,7 +486,7 @@ Suggested signed message:
 ```
 
 The precise canonicalization must be specified once and used
-consistently by Relay and its receiver SDK.
+consistently by SignalMesh and its receiver SDK.
 
 ## FR-012: Delivery inspection
 
@@ -525,7 +525,7 @@ Do not record secrets or unrestricted sensitive payloads in audit logs.
 
 ## NFR-001: Durability
 
-Once Relay returns `202 Accepted`, the event and initial delivery
+Once SignalMesh returns `202 Accepted`, the event and initial delivery
 scheduling records must be committed to durable storage. A process
 restart must not lose accepted work.
 
@@ -538,7 +538,7 @@ reliability, and backup practices. Document those assumptions.
     configured retry policy.
 -   Duplicate delivery is possible.
 -   Consumers must deduplicate using stable event identifiers.
--   Exactly-once business processing is outside Relay's control.
+-   Exactly-once business processing is outside SignalMesh's control.
 -   Ordering is not guaranteed in the MVP unless explicitly configured
     and implemented.
 
@@ -651,7 +651,7 @@ response format.
 ## 8.1 Authentication
 
 ``` http
-Authorization: Bearer <relay_api_key>
+Authorization: Bearer <SignalMesh_api_key>
 ```
 
 Administrative and producer keys should have distinct scopes where
@@ -707,7 +707,7 @@ Request:
 ``` json
 {
   "name": "Merchant order service",
-  "url": "https://merchant.example.com/webhooks/relay",
+  "url": "https://merchant.example.com/webhooks/SignalMesh",
   "event_types": [
     "payment.succeeded",
     "payment.failed"
@@ -718,7 +718,7 @@ Request:
 ```
 
 Response should return endpoint ID and the signing secret only at
-creation time, if generated by Relay. Store only a protected
+creation time, if generated by SignalMesh. Store only a protected
 representation of the secret thereafter.
 
 ## 8.4 List deliveries
@@ -817,7 +817,7 @@ should be finalized during implementation.
   payload           JSONB         Immutable event envelope/data
   payload_hash      BYTEA         Integrity/idempotency support
   occurred_at       TIMESTAMPTZ   Producer event time
-  created_at        TIMESTAMPTZ   Relay acceptance time
+  created_at        TIMESTAMPTZ   SignalMesh acceptance time
 
 ## 9.4 endpoints
 
@@ -1130,13 +1130,13 @@ diagnostics where necessary.
 
 ## 13.2 Prometheus metrics
 
-Suggested metrics: - `relay_events_accepted_total` -
-`relay_event_ingest_errors_total` - `relay_deliveries_created_total` -
-`relay_delivery_attempts_total` - `relay_delivery_success_total` -
-`relay_delivery_failure_total` - `relay_delivery_duration_seconds` -
-`relay_queue_depth` - `relay_oldest_pending_delivery_age_seconds` -
-`relay_worker_active_count` - `relay_worker_claim_errors_total` -
-`relay_dead_letter_total` - `relay_http_requests_total`
+Suggested metrics: - `SignalMesh_events_accepted_total` -
+`SignalMesh_event_ingest_errors_total` - `SignalMesh_deliveries_created_total` -
+`SignalMesh_delivery_attempts_total` - `SignalMesh_delivery_success_total` -
+`SignalMesh_delivery_failure_total` - `SignalMesh_delivery_duration_seconds` -
+`SignalMesh_queue_depth` - `SignalMesh_oldest_pending_delivery_age_seconds` -
+`SignalMesh_worker_active_count` - `SignalMesh_worker_claim_errors_total` -
+`SignalMesh_dead_letter_total` - `SignalMesh_http_requests_total`
 
 Avoid event IDs, tenant IDs, endpoint URLs, or arbitrary event types as
 unbounded metric labels. Use bounded labels such as outcome and error
@@ -1163,28 +1163,28 @@ One endpoint repeatedly times out or returns 5xx.
 Use environment variables, with documented defaults.
 
 ``` dotenv
-RELAY_ENV=development
-RELAY_HTTP_ADDR=:8080
+SignalMesh_ENV=development
+SignalMesh_HTTP_ADDR=:8080
 
-DATABASE_URL=postgres://relay:relay@postgres:5432/relay?sslmode=disable
+DATABASE_URL=postgres://SignalMesh:SignalMesh@postgres:5432/SignalMesh?sslmode=disable
 DATABASE_MAX_OPEN_CONNS=20
 DATABASE_MAX_IDLE_CONNS=10
 
-RELAY_WORKER_CONCURRENCY=10
-RELAY_WORKER_BATCH_SIZE=20
-RELAY_WORKER_POLL_INTERVAL=1s
-RELAY_WORKER_LEASE_DURATION=45s
+SignalMesh_WORKER_CONCURRENCY=10
+SignalMesh_WORKER_BATCH_SIZE=20
+SignalMesh_WORKER_POLL_INTERVAL=1s
+SignalMesh_WORKER_LEASE_DURATION=45s
 
-RELAY_DELIVERY_TIMEOUT=10s
-RELAY_MAX_ATTEMPTS=8
-RELAY_RETRY_BASE_DELAY=2s
-RELAY_RETRY_MAX_DELAY=1h
+SignalMesh_DELIVERY_TIMEOUT=10s
+SignalMesh_MAX_ATTEMPTS=8
+SignalMesh_RETRY_BASE_DELAY=2s
+SignalMesh_RETRY_MAX_DELAY=1h
 
-RELAY_MAX_EVENT_BYTES=262144
-RELAY_MAX_RESPONSE_BYTES=16384
+SignalMesh_MAX_EVENT_BYTES=262144
+SignalMesh_MAX_RESPONSE_BYTES=16384
 
-RELAY_METRICS_ADDR=:9090
-RELAY_LOG_LEVEL=info
+SignalMesh_METRICS_ADDR=:9090
+SignalMesh_LOG_LEVEL=info
 ```
 
 These are starting defaults, not universal production values. Validate
@@ -1198,7 +1198,7 @@ Never commit real secrets or production database credentials.
 # 15. Recommended Repository Structure
 
 ``` text
-relay/
+SignalMesh/
 ├── cmd/
 │   ├── api/
 │   │   └── main.go
@@ -1299,7 +1299,7 @@ Return 400. - Return 429 with `Retry-After`. - Return 500. - Delay
 responses. - Close connections. - Accept a request but drop the
 response. - Record duplicate event IDs.
 
-Verify the expected Relay state and attempt history for every scenario.
+Verify the expected SignalMesh state and attempt history for every scenario.
 
 ## 16.4 Load and resilience tests
 
@@ -1315,7 +1315,7 @@ configuration. Never publish benchmark numbers without methodology.
 
 1.  Kill a worker after claiming a delivery.
 2.  Kill a worker after the receiver accepts the request but before
-    Relay records success.
+    SignalMesh records success.
 3.  Restart PostgreSQL during ingestion.
 4.  Simulate DNS failure.
 5.  Simulate a slow receiver.
@@ -1379,7 +1379,7 @@ Deliver: - OpenAPI specification. - CLI or Go SDK. - Example producer. -
 Example receiver with signature verification. - Optional dashboard. -
 Public demo environment or reproducible local demo.
 
-Done when an external developer can integrate Relay without reading its
+Done when an external developer can integrate SignalMesh without reading its
 internal source code.
 
 ------------------------------------------------------------------------
@@ -1389,8 +1389,8 @@ internal source code.
 The MVP is complete only when all of the following are true:
 
 -   [ ] A producer can authenticate and submit an event.
--   [ ] Relay persists the event and initial delivery work atomically.
--   [ ] Relay returns an event ID and does not wait for destination
+-   [ ] SignalMesh persists the event and initial delivery work atomically.
+-   [ ] SignalMesh returns an event ID and does not wait for destination
     delivery.
 -   [ ] An event can fan out to multiple endpoints.
 -   [ ] Workers can process jobs concurrently without conflicting
@@ -1422,7 +1422,7 @@ coding agent.
 
 ## 19.1 Role
 
-Act as a senior backend engineer implementing Relay from this
+Act as a senior backend engineer implementing SignalMesh from this
 specification. Prioritize correctness, security, durability,
 testability, and maintainability over speed or unnecessary abstraction.
 
@@ -1500,7 +1500,7 @@ result was observed.
 
 Use this as the first instruction to your coding agent:
 
-> Read `RELAY_SPEC.md` completely. Inspect the repository and report its
+> Read `SignalMesh_SPEC.md` completely. Inspect the repository and report its
 > current structure, language/toolchain, existing implementation, and
 > test status. Then propose a concise implementation plan for Milestone
 > 0 and Milestone 1. Do not write code yet. Identify ambiguities,
@@ -1721,7 +1721,7 @@ time? This must be settled as part of the SSRF implementation.
 
 # 22. Product Quality Bar
 
-Relay should not be considered successful merely because it can send a
+SignalMesh should not be considered successful merely because it can send a
 webhook.
 
 A credible release should demonstrate:
@@ -1743,6 +1743,6 @@ an event, make the receiver unavailable, observe retries, restart a
 worker, restore the receiver, and show successful recovery without
 losing the event.
 
-**Final product positioning:** Relay is a self-hostable, observable,
+**Final product positioning:** SignalMesh is a self-hostable, observable,
 fault-tolerant webhook delivery engine for developers who need reliable
 event delivery without building the entire mechanism themselves.
