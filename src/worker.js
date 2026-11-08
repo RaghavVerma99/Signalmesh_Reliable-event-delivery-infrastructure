@@ -1,8 +1,9 @@
 'use strict';
 
-const crypto = require('crypto');
 const store = require('./store');
 const { nowIso } = require('./store');
+const { signDelivery, MAX_RESPONSE_BYTES } = require('./security');
+const metrics = require('./metrics');
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 const DEFAULT_TIMEOUT_MS = 5000;
@@ -15,6 +16,17 @@ function computeBackoffMs(attemptNumber, baseDelayMs, maxDelayMs) {
   const exp = Math.max(0, attemptNumber - 1);
   const cap = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, exp));
   return Math.random() * cap;
+}
+
+function recordDeliveryOutcome(outcome, durationMs) {
+  metrics.inc('delivery_attempts_total');
+  metrics.observeDuration(durationMs / 1000);
+  if (outcome.type === 'succeeded') {
+    metrics.inc('delivery_success_total');
+  }
+  if (outcome.type === 'dead') {
+    metrics.inc('delivery_dead_letter_total');
+  }
 }
 
 async function runAttempt(delivery) {
@@ -57,7 +69,7 @@ async function runAttempt(delivery) {
 
       const body = JSON.stringify(envelope);
       const timestamp = Math.floor(Date.now() / 1000);
-      const signature = 'v1=' + crypto.createHmac('sha256', endpoint.signingSecret).update(timestamp + '.' + body).digest('hex');
+      const signature = signDelivery(endpoint.signingSecret, timestamp, body);
 
       const res = await fetch(endpoint.url, {
         method: 'POST',
@@ -70,9 +82,11 @@ async function runAttempt(delivery) {
         },
         body,
         signal: AbortSignal.timeout(endpoint.timeoutMs || DEFAULT_TIMEOUT_MS),
+        redirect: 'manual',
       });
       const text = await res.text();
-      const excerpt = text ? text.slice(0, 2048) : null;
+      const buf = Buffer.from(text, 'utf8');
+      const excerpt = buf.length > MAX_RESPONSE_BYTES ? buf.subarray(0, MAX_RESPONSE_BYTES).toString('utf8') : (text || null);
       attempt.finishedAt = new Date().toISOString();
       attempt.durationMs = Date.now() - startedAtMs;
       attempt.statusCode = res.status;
@@ -131,11 +145,13 @@ async function runAttempt(delivery) {
   if (outcome.type === 'retry') {
     delivery.status = 'retry_scheduled';
     delivery.nextAttemptAt = new Date(Date.now() + (outcome.delayMs || 0)).toISOString();
+    recordDeliveryOutcome(outcome, Date.now() - startedAtMs);
     return { ok: false, delivery, dead: false };
   }
 
   delivery.status = 'dead_lettered';
   delivery.nextAttemptAt = null;
+  recordDeliveryOutcome(outcome, Date.now() - startedAtMs);
   return { ok: false, delivery, dead: true };
 }
 
@@ -156,14 +172,39 @@ function claimDueDelivery() {
   return candidates.length ? candidates[0] : null;
 }
 
+function updateQueueMetrics() {
+  const nowMs = Date.now();
+  const pending = store.state.deliveries.filter((d) => {
+    const status = d.status;
+    if (status !== 'pending' && status !== 'retry_scheduled') return false;
+    if (d.lockedUntil && new Date(d.lockedUntil).getTime() > nowMs) return false;
+    if (d.nextAttemptAt && new Date(d.nextAttemptAt).getTime() > nowMs) return false;
+    return true;
+  });
+  metrics.setGauge('queue_depth', pending.length);
+  let oldest = null;
+  for (const d of store.state.deliveries) {
+    if (d.status !== 'pending') continue;
+    const startedAtMs = new Date(d.createdAt).getTime();
+    const ageMs = nowMs - startedAtMs;
+    if (ageMs > 0 && (oldest === null || ageMs > oldest)) {
+      oldest = ageMs;
+    }
+  }
+  metrics.setGauge('oldest_pending_age_seconds', oldest ? oldest / 1000 : 0);
+}
+
 async function tick() {
+  updateQueueMetrics();
   const delivery = claimDueDelivery();
   if (!delivery) return;
+  metrics.setGauge('worker_active_count', 1);
   try {
     await runAttempt(delivery);
   } catch (err) {
     console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'error', msg: 'delivery_attempt_failed', delivery_id: delivery.id, error: String(err && err.message ? err.message : err) }));
   }
+  metrics.setGauge('worker_active_count', 0);
 }
 
 let timer = null;

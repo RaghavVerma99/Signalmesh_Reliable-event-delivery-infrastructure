@@ -5,6 +5,8 @@ const crypto = require('crypto');
 const store = require('./store');
 const worker = require('./worker');
 const { genId, stableStringify, hashToken, nowIso } = require('./store');
+const { validateDeliveryUrl, verifyDeliverySignature } = require('./security');
+const metrics = require('./metrics');
 
 const app = express();
 app.use(express.json({ limit: '256kb' }));
@@ -26,6 +28,16 @@ function errorBody(code, message, reqId) {
 
 app.use((req, res, next) => {
   req.id = newRequestId();
+  next();
+});
+
+app.use((req, res, next) => {
+  const startAt = Date.now();
+  res.on('finish', () => {
+    const durationMs = Date.now() - startAt;
+    metrics.inc('http_requests_total');
+    log('info', 'http_request', { request_id: req.id, method: req.method, path: req.path, status: res.statusCode, duration_ms: durationMs });
+  });
   next();
 });
 
@@ -71,6 +83,7 @@ app.post('/v1/events', (req, res) => {
   const body = req.body || {};
   const eventType = typeof body.event_type === 'string' ? body.event_type.trim() : '';
   if (!eventType) {
+    metrics.inc('events_ingest_errors_total');
     return res.status(422).json(errorBody('validation_failed', 'event_type is required', req.id));
   }
   const data = body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : {};
@@ -100,6 +113,7 @@ app.post('/v1/events', (req, res) => {
     deliveries: [],
   };
   store.insertEvent(event);
+  metrics.inc('events_accepted_total');
 
   const deliveries = [];
   const endpoints = store.listEndpoints().filter((e) => !e.deletedAt && e.active);
@@ -156,7 +170,7 @@ function publicEndpoint(ep) {
   };
 }
 
-app.post('/v1/endpoints', (req, res) => {
+app.post('/v1/endpoints', async (req, res) => {
   const body = req.body || {};
   const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : 'endpoint';
   const url = typeof body.url === 'string' ? body.url.trim() : '';
@@ -168,6 +182,15 @@ app.post('/v1/endpoints', (req, res) => {
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return res.status(422).json(errorBody('validation_failed', 'url must use http or https', req.id));
+  }
+  let deliveryUrlCheck;
+  try {
+    deliveryUrlCheck = await validateDeliveryUrl(url);
+  } catch (e) {
+    return res.status(422).json(errorBody('validation_failed', 'url validation failed', req.id));
+  }
+  if (!deliveryUrlCheck.ok) {
+    return res.status(422).json(errorBody('validation_failed', 'url rejected: ' + deliveryUrlCheck.error, req.id));
   }
   const eventTypes = Array.isArray(body.event_types) ? body.event_types.filter((t) => typeof t === 'string') : ['*'];
   const timeoutSeconds = typeof body.timeout_seconds === 'number' && body.timeout_seconds > 0 ? body.timeout_seconds : 10;
@@ -189,6 +212,15 @@ app.post('/v1/endpoints', (req, res) => {
     deletedAt: null,
   });
   return res.status(201).json({ endpoint: publicEndpoint(endpoint), signing_secret: signingSecret });
+});
+
+app.post('/v1/keys/:id/revoke', requireAuth, (req, res) => {
+  const key = store.revokeKey(req.params.id);
+  if (!key) {
+    return res.status(404).json(errorBody('not_found', 'API key not found', req.id));
+  }
+  log('info', 'api_key_revoked', { key_id: key.id, name: key.name });
+  return res.json({ revoked: true, id: key.id, revoked_at: key.revokedAt });
 });
 
 app.get('/v1/endpoints', (req, res) => {
@@ -305,9 +337,8 @@ app.post('/demo/orders', (req, res) => {
   const deliveryId = req.headers['x-signalmesh-delivery-id'];
   const delivery = store.state.deliveries.find((d) => d.id === deliveryId) || null;
   const secret = delivery ? (store.state.endpoints.find((e) => e.id === delivery.endpointId) || {}).signingSecret : null;
-  const expectedSig = 'v1=' + crypto.createHmac('sha256', secret || 'whsec_missing').update(String(req.headers['x-signalmesh-timestamp']) + '.' + JSON.stringify(req.body)).digest('hex');
   const sig = String(req.headers['x-signalmesh-signature'] || '');
-  const ok = !!secret && sig === expectedSig;
+  const ok = !!secret && verifyDeliverySignature(secret, String(req.headers['x-signalmesh-timestamp'] || ''), sig, JSON.stringify(req.body));
   if (!ok) {
     return res.status(401).json({ error: 'invalid_signature' });
   }
@@ -324,6 +355,11 @@ app.post('/demo/orders-flaky', (req, res) => {
 
 app.post('/demo/orders-down', (req, res) => {
   res.status(500).json({ error: 'destination down' });
+});
+
+app.get('/metrics', (req, res) => {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.status(200).send(metrics.renderPrometheus());
 });
 
 app.use((req, res) => {
