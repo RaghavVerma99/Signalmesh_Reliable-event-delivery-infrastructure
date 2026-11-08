@@ -143,6 +143,7 @@ app.post('/v1/events', (req, res) => {
   }
 
   log('info', 'event_accepted', { event_id: event.id, event_type: event.eventType, deliveries_created: deliveries.length });
+  store.persist();
   return res.status(202).json({ event_id: event.id, status: 'accepted', created_at: event.createdAt, deliveries_created: deliveries.length });
 });
 
@@ -306,6 +307,7 @@ app.post('/v1/deliveries/:id/replay', (req, res) => {
   });
   const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason : null;
   log('info', 'delivery_replayed', { delivery_id: original.id, replay_delivery_id: newDelivery.id, reason: reason });
+  store.persist();
   return res.status(202).json({ delivery_id: newDelivery.id, status: 'pending', replay_of: original.id, reason: reason });
 });
 

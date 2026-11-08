@@ -185,3 +185,4 @@ module.exports.genId = genId;
 module.exports.stableStringify = stableStringify;
 module.exports.hashToken = hashToken;
 module.exports.nowIso = nowIso;
+module.exports.persist = persist;

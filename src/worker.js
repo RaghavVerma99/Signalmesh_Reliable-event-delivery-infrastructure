@@ -224,4 +224,4 @@ function stop() {
   }
 }
 
-module.exports = { start, stop, tick, runAttempt, claimDueDelivery };
+module.exports = { start, stop, tick, runAttempt, claimDueDelivery, computeBackoffMs, RETRYABLE_STATUS };
