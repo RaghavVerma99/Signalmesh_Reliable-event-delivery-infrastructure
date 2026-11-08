@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { createPostgresStoreFromEnv } = require('./storage/postgres');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'db.json');
@@ -180,9 +181,12 @@ const store = {
   },
 };
 
-module.exports = store;
+const storeImpl = process.env.SIGNALMESH_STORAGE === 'postgres' ? createPostgresStoreFromEnv() : store;
+
+module.exports = storeImpl;
 module.exports.genId = genId;
 module.exports.stableStringify = stableStringify;
 module.exports.hashToken = hashToken;
 module.exports.nowIso = nowIso;
-module.exports.persist = persist;
+module.exports.persist = typeof storeImpl.persist === 'function' ? storeImpl.persist.bind(storeImpl) : (async () => {});
+module.exports.state = storeImpl.state;
