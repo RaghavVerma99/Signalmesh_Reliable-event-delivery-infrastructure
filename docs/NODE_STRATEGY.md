@@ -54,24 +54,24 @@ These close exploitable gaps in the running code before any feature work.
 
 | # | Acceptance criterion | Node status | Owner file(s) |
 |---|---|---|---|
-| 1 | Producer authenticates and submits event | ✅ Done | `server.js` |
-| 2 | Persist event + delivery work atomically before 202 | ❌ Fail | `store.js` → Postgres transaction |
-| 3 | Returns event ID, doesn't wait for destination | ✅ Done | `server.js` |
-| 4 | Fan-out to multiple endpoints | ✅ Done | `server.js` |
-| 5 | Concurrent workers without conflicting claims | ❌ Fail | `worker.js` → `SKIP LOCKED` |
-| 6 | Same idempotency key ⇒ no duplicate event | ⚠ Partial | `store.js` → expiry + unique constraint |
-| 7 | Same key, different payload ⇒ 409 | ✅ Done | `server.js` |
+| 1 | Producer authenticates and submits event | ✅ Done | `app.js` |
+| 2 | Persist event + delivery work atomically before 202 | ✅ Done (Postgres transaction; JSON sync flush) | `storage/postgres.js`, `storage/json.js` |
+| 3 | Returns event ID, doesn't wait for destination | ✅ Done | `app.js` |
+| 4 | Fan-out to multiple endpoints | ✅ Done | `app.js` |
+| 5 | Concurrent workers without conflicting claims | ✅ Done (Postgres `SKIP LOCKED`; JSON in-process) | `storage/postgres.js`, `worker.js` |
+| 6 | Same idempotency key ⇒ no duplicate event | ✅ Done (TTL + unique constraint) | `storage/postgres.js` |
+| 7 | Same key, different payload ⇒ 409 | ✅ Done | `app.js` |
 | 8 | Outbound HMAC signatures verifiable | ✅ Done | `security.js` |
-| 9 | Timeouts/retries per policy | ⚠ Partial | Defaults aligned to spec + env-configurable; lease/concurrency pending |
-| 10 | Retry scheduling survives restarts | ❌ Fail | `store.js` → Postgres |
-| 11 | Worker crash recovery via lease expiry | ❌ Fail | `worker.js` + `store.js` |
+| 9 | Timeouts/retries per policy | ✅ Done | `worker.js` |
+| 10 | Retry scheduling survives restarts | ✅ Done (Postgres) | `storage/postgres.js` |
+| 11 | Worker crash recovery via lease expiry | ✅ Done (lease + stale-worker guard) | `worker.js`, `storage/postgres.js` |
 | 12 | Exhausted deliveries dead-lettered | ✅ Done | `worker.js` |
-| 13 | Inspect attempts; replay failed deliveries | ✅ Done | `server.js` + `store.js` |
-| 14 | Tenant isolation by automated tests | ❌ Fail | New tests |
-| 15 | SSRF protections implemented + tested | ⚠ Partial | Delivery-time re-check added; connected-IP check + tests pending |
-| 16 | Health/readiness/logs/metrics | ⚠ Partial | `server.js` + `metrics.js` |
-| 17 | Docker Compose local env | ❌ Fail | `docker-compose.yml` + `Dockerfile` |
-| 18 | Integration + e2e tests pass | ❌ Fail | New tests |
+| 13 | Inspect attempts; replay failed deliveries | ✅ Done | `app.js` |
+| 14 | Tenant isolation covered by automated tests | ✅ Done | `tests/store.test.js`, `tests/api.test.js` |
+| 15 | SSRF protections implemented + tested | ⚠ Partial | Delivery-time re-check done; connected-IP check + tests pending |
+| 16 | Health/readiness/logs/metrics | ✅ Done (readyz checks storage) | `app.js`, `metrics.js` |
+| 17 | Docker Compose local env | ✅ Done (all-in-one + split profile) | `Dockerfile`, `docker-compose.yml` |
+| 18 | Integration + e2e tests pass | ✅ Done (unit + API integration; PG integration in CI) | `tests/` |
 | 19 | README explains guarantees/limits/setup | ✅ Done | `README.md` |
 
 ---
@@ -100,3 +100,22 @@ These close exploitable gaps in the running code before any feature work.
 ## 7. How to use this with the existing checklist
 
 `docs/CHECKLIST.md` remains the companion checklist. Update its "Status" column using Section 4 above. The corrected finding: constant-time signature comparison **is** implemented (`timingSafeEqual` in `security.js`) — the checklist's "Missing" mark for that item is incorrect.
+
+---
+
+## 8. Implemented in this pass (2026-11-11)
+
+Tenant isolation, PostgreSQL, rate limiting, audit logging, process split, tests, and CI are now in place:
+
+- **Tenant model**: `organizations` + `organization_id` scoping across keys, events, endpoints, deliveries, idempotency, and audit. Bootstrap creates the first org; all queries are tenant scoped.
+- **Async store contract**: `src/storage/json.js` and `src/storage/postgres.js` implement the same interface; `src/store.js` selects via `SIGNALMESH_STORAGE`.
+- **PostgreSQL**: `src/storage/migrations/001_init.sql` (tables + indexes + unique constraints), `src/storage/migrate.js` runner, atomic `ingestEvent` transaction, `FOR UPDATE SKIP LOCKED` claiming, lease + stale-worker guard, `delivery_attempts`.
+- **Rate limiting**: `src/ratelimit.js` tenant token bucket, `429` + `Retry-After` (in-process; Redis/PG for multi-replica).
+- **Audit log**: append-only, tenant-scoped, exposed at `GET /v1/audit`; records key, endpoint, event, replay, cancel actions.
+- **Endpoint PATCH**: `PATCH /v1/endpoints/:id` with URL re-validation.
+- **Cursor pagination** on events and deliveries.
+- **API/worker split**: `src/api.js`, `src/worker-main.js`, `SIGNALMESH_ROLE`, `npm run start:api` / `start:worker`; Docker Compose `split` profile.
+- **Tests**: 18 unit/integration tests + conditional PostgreSQL integration test; `tests/api.test.js`, `tests/store.test.js`, `tests/ratelimit.test.js`.
+- **CI**: `.github/workflows/ci.yml` (Node 22/24, PostgreSQL service, Docker build).
+
+Remaining for full spec parity: connected-IP SSRF validation, OpenTelemetry, outbox table usage, secret-rotation overlap, and load/failure-injection benchmarks.

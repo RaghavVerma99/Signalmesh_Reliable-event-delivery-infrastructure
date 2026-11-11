@@ -1,5 +1,7 @@
 # SignalMesh Audit Report & Implementation Strategy
 
+> **Status note (2026-11-11):** this is the original audit baseline. Tenant isolation, PostgreSQL, rate limiting, audit logging, the API/worker split, tests, and CI have since been implemented. See `docs/CHECKLIST.md` (sections 9-10) and `docs/NODE_STRATEGY.md` (section 8) for the current status.
+
 **Repository:** SignalMesh webhook delivery MVP  
 **Audit date:** 2026-11-11  
 **Spec audited against:** `SIGNALMESH_SPEC.md` v1.0 (PRD + SRS + Technical Design)  

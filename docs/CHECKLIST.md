@@ -10,59 +10,59 @@ Companion to SIGNALMESH_SPEC.md. Audits the current MVP implementation and track
 
 | Area | Status | Notes |
 |---|---|---|
-| Stack vs. spec | Warning | Node.js 26 + Express 4 (MVP). Spec prescribes Go + PostgreSQL + Docker Compose. Deviation to resolve. |
-| API surface | Partial | Keys bootstrap, events, deliveries, endpoints (no PATCH), replay/cancel, demo receivers. No revoke route. |
-| Persistence | Partial | JSON file (data/db.json), debounced writes, best-effort. Spec NFR-001 wants durable commit before 202. |
-| Delivery engine | Partial | Single worker, 1s poll, one delivery/tick, in-process lease. Retry defaults deviate from spec suggestions. |
-| Security | Partial | SSRF blocklist at registration + delivery-time re-check; redirects disabled; constant-time signature compare implemented; response-size cap; encrypted signing secrets; key revocation exists. Still missing: rate limiting, API-key pepper in prod config, audit logging. |
-| Observability | Missing | JSON logs ok; no Prometheus metrics, no OTel, no worker heartbeat/ready check. |
-| Tests / CI / DX | Missing | No tests, no CI workflow, no Docker, no OpenAPI, no CLI/SDK/dashboard. |
+| Stack vs. spec | Accepted deviation | Node.js + Express retained by decision; PostgreSQL is the durable store. Spec's Go prescription is intentionally not followed (see NODE_STRATEGY.md). |
+| API surface | Done | Keys bootstrap/list/revoke, events, deliveries, endpoints incl. PATCH, replay/cancel, audit, demo receivers. |
+| Persistence | Done | JSON (dev) or PostgreSQL (atomic ingest transaction, indexes, constraints, idempotency TTL). |
+| Delivery engine | Done | Concurrent claims, Postgres `FOR UPDATE SKIP LOCKED`, lease expiry + stale-worker guard, attempt history, configurable concurrency. |
+| Security | Partial | SSRF blocklist + delivery-time re-check; redirects disabled; constant-time signature compare; response cap; encrypted secrets; keyed key hashing; tenant rate limiting; audit log. Remaining: connected-IP validation, secret rotation. |
+| Observability | Partial | Structured JSON logs, Prometheus `/metrics`, `/readyz` storage check. Remaining: OTel, worker heartbeat. |
+| Tests / CI / DX | Partial | 18 unit/integration tests + PG integration (CI), GitHub Actions, Dockerfile + Compose, dashboard, seed/demo scripts. Remaining: OpenAPI, SDK/CLI, load tests. |
 
 ## 2. End-product acceptance criteria - master checklist (SPEC section 18)
 
-- [ ] A producer can authenticate and submit an event.
-- [ ] SignalMesh persists the event and initial delivery work atomically.
-- [ ] SignalMesh returns an event ID and does not wait for destination delivery.
-- [ ] An event can fan out to multiple endpoints.
-- [ ] Workers can process jobs concurrently without conflicting claims.
-- [ ] Duplicate ingestion with the same idempotency key does not create a second event.
-- [ ] Reuse of an idempotency key with a different payload returns a conflict.
-- [ ] Outbound requests include verifiable HMAC signatures.
-- [ ] Timeouts and retryable failures are retried according to policy.
-- [ ] Retry scheduling survives restarts.
-- [ ] Worker crashes are recovered through lease expiry.
-- [ ] Exhausted deliveries become dead-lettered.
-- [ ] Operators can inspect attempts and replay failed deliveries.
-- [ ] Tenant isolation is covered by automated tests.
-- [ ] SSRF protections are implemented and tested.
-- [ ] Health, readiness, logs, and metrics are available.
-- [ ] Docker Compose starts a working local environment.
-- [ ] Integration and end-to-end tests pass.
-- [ ] README explains guarantees, limitations, setup, and example integration.
+- [x] A producer can authenticate and submit an event.
+- [x] SignalMesh persists the event and initial delivery work atomically (PostgreSQL transaction; JSON sync flush).
+- [x] SignalMesh returns an event ID and does not wait for destination delivery.
+- [x] An event can fan out to multiple endpoints.
+- [x] Workers can process jobs concurrently without conflicting claims (PostgreSQL `FOR UPDATE SKIP LOCKED`).
+- [x] Duplicate ingestion with the same idempotency key does not create a second event.
+- [x] Reuse of an idempotency key with a different payload returns a conflict.
+- [x] Outbound requests include verifiable HMAC signatures.
+- [x] Timeouts and retryable failures are retried according to policy.
+- [x] Retry scheduling survives restarts (PostgreSQL).
+- [x] Worker crashes are recovered through lease expiry.
+- [x] Exhausted deliveries become dead-lettered.
+- [x] Operators can inspect attempts and replay failed deliveries.
+- [x] Tenant isolation is covered by automated tests.
+- [ ] SSRF protections are implemented and tested (delivery-time re-check done; connected-IP validation + dedicated tests pending).
+- [x] Health, readiness, logs, and metrics are available.
+- [x] Docker Compose starts a working local environment.
+- [x] Integration and end-to-end tests pass.
+- [x] README explains guarantees, limitations, setup, and example integration.
 
 ## 3. MVP scope checklist - SPEC section 4.1
 
-- [x] API-key authentication - Auth implemented; revoke route present; scopes/rotation exposure still missing.
-- [ ] Tenant/organization isolation - Missing.
+- [x] API-key authentication - Auth, list, revoke; scopes stored (rotation exposure still missing).
+- [x] Tenant/organization isolation - Implemented and tested.
 - [x] Event ingestion - Implemented.
-- [ ] Event persistence - JSON-file store (not PostgreSQL).
-- [ ] Endpoint registration and management - Missing PATCH endpoint.
+- [x] Event persistence - JSON (dev) or PostgreSQL (durable, atomic).
+- [x] Endpoint registration and management - Full CRUD incl. PATCH.
 - [x] Event-type subscriptions - Implemented (* wildcard supported).
-- [ ] Delivery creation and dispatch - No transactional outbox pattern.
-- [ ] PostgreSQL-backed worker scheduling - Missing.
-- [ ] Configurable concurrency - Missing (single worker today).
+- [ ] Delivery creation and dispatch - Atomic transaction in PostgreSQL; outbox table not used yet.
+- [x] PostgreSQL-backed worker scheduling - Implemented with `SKIP LOCKED`.
+- [x] Configurable concurrency - `SIGNALMESH_WORKER_CONCURRENCY`.
 - [x] HTTP timeouts - Implemented (10s default, env-configurable).
-- [ ] Bounded retry with exponential backoff and jitter - Defaults now aligned to spec (8 attempts, 2s base, 1h cap); configurable via env.
-- [x] HMAC-SHA256 webhook signatures - Constant-time comparison implemented (`timingSafeEqual`); signed over `timestamp.body`.
+- [x] Bounded retry with exponential backoff and jitter - Spec-aligned defaults, env-configurable.
+- [x] HMAC-SHA256 webhook signatures - Constant-time comparison (`timingSafeEqual`); signed over `timestamp.body`.
 - [x] Delivery and attempt history - Implemented.
 - [x] Dead-letter state - Implemented.
-- [x] Manual replay - Implemented; audit fields partial.
-- [ ] Basic rate limiting - Missing.
-- [ ] Structured logs - Partial.
-- [ ] Prometheus metrics - Partial (`/metrics` with core counters/gauges/histogram).
-- [ ] Health and readiness endpoints - Partial (no dependency checks / heartbeat).
-- [ ] Docker Compose deployment - Missing.
-- [ ] Unit and integration tests - Unit tests added (11 passing); integration/e2e missing.
+- [x] Manual replay - Implemented with audit record.
+- [x] Basic rate limiting - Tenant token bucket, `429` + `Retry-After`.
+- [x] Structured logs - JSON logs with request/org IDs.
+- [x] Prometheus metrics - `/metrics` with counters/gauges/histogram.
+- [x] Health and readiness endpoints - `/readyz` checks storage.
+- [x] Docker Compose deployment - All-in-one + split profile.
+- [x] Unit and integration tests - 18 passing + PostgreSQL integration in CI.
 
 ## 4. Milestone checklists - SPEC section 17
 
@@ -171,9 +171,19 @@ Phase 1 security fixes completed in this pass:
 - [x] Test script added (`npm test`) - 11 tests passing.
 - [x] `.env.example` and end-to-end smoke script (`scripts/smoke.js`).
 
-Remaining before feature work:
+Phase 1 previously-implemented items now extended in Section 10 (tenant scoping, PostgreSQL wiring). Remaining security follow-ups:
 
-- [ ] Add API-key pepper + encryption key to production config validation / docs.
 - [ ] Enforce connected-IP check (not just resolved IP) for full DNS-rebinding defense.
-- [ ] Add tenant scoping so keys cannot see each other's data.
-- [ ] Repair and wire `src/storage/postgres.js` with migrations + indexes.
+- [ ] Secret-rotation overlap window.
+
+## 10. Implementation pass 2 (2026-11-11) - roadmap items completed
+
+- [x] **Tenant isolation** - `organizations` + `organization_id` scoping on every table/query; bootstrap creates the first org; tests in `tests/store.test.js` and `tests/api.test.js`.
+- [x] **PostgreSQL + migrations** - `src/storage/migrations/001_init.sql`, `src/storage/migrate.js`, `npm run migrate`; atomic `ingestEvent`, `FOR UPDATE SKIP LOCKED` claiming, lease + stale-worker guard, attempt history.
+- [x] **Rate limiting** - `src/ratelimit.js` tenant token bucket; `429` + `Retry-After`; `tests/ratelimit.test.js`.
+- [x] **Audit logging** - append-only audit log, `GET /v1/audit`, tenant scoped.
+- [x] **API/worker split** - `src/api.js`, `src/worker-main.js`, `SIGNALMESH_ROLE`, `npm run start:api` / `start:worker`, Compose `split` profile.
+- [x] **PATCH endpoint + cursor pagination** - `PATCH /v1/endpoints/:id`; `cursor` on events/deliveries.
+- [x] **Tests + CI** - 18 passing unit/integration tests + conditional PostgreSQL integration; `.github/workflows/ci.yml` (Node 22/24, PostgreSQL service, Docker build).
+
+Outstanding from the spec: connected-IP SSRF validation, outbox-table usage, OpenTelemetry, secret rotation, load/failure-injection benchmarks, OpenAPI/SDK/CLI.
