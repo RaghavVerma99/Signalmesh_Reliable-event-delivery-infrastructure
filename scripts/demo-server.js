@@ -11,4 +11,7 @@ process.env.SIGNALMESH_RETRY_BASE_DELAY_MS = process.env.SIGNALMESH_RETRY_BASE_D
 process.env.SIGNALMESH_RETRY_MAX_DELAY_MS = process.env.SIGNALMESH_RETRY_MAX_DELAY_MS || '5000';
 process.env.SIGNALMESH_ENABLE_DASHBOARD = process.env.SIGNALMESH_ENABLE_DASHBOARD || 'true';
 
-require('../src/server');
+require('../src/server').start().catch((err) => {
+  console.error('demo server failed:', err && err.message ? err.message : err);
+  process.exit(1);
+});

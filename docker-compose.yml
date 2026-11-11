@@ -1,4 +1,5 @@
 services:
+  # All-in-one process (API + worker). Default local/demo deployment.
   signalmesh:
     build: .
     image: signalmesh:local
@@ -6,15 +7,15 @@ services:
       - "8080:8080"
     environment:
       SIGNALMESH_ENV: ${SIGNALMESH_ENV:-development}
+      SIGNALMESH_ROLE: all
       PORT: "8080"
       SIGNALMESH_STORAGE: ${SIGNALMESH_STORAGE:-json}
-      # Generate these for anything beyond a local demo:
-      #   openssl rand -hex 32
       SIGNALMESH_SECRET_ENCRYPTION_KEY: ${SIGNALMESH_SECRET_ENCRYPTION_KEY:-}
       SIGNALMESH_API_KEY_PEPPER: ${SIGNALMESH_API_KEY_PEPPER:-}
       SIGNALMESH_MAX_ATTEMPTS: ${SIGNALMESH_MAX_ATTEMPTS:-8}
       SIGNALMESH_RETRY_BASE_DELAY_MS: ${SIGNALMESH_RETRY_BASE_DELAY_MS:-2000}
       SIGNALMESH_RETRY_MAX_DELAY_MS: ${SIGNALMESH_RETRY_MAX_DELAY_MS:-3600000}
+      SIGNALMESH_WORKER_CONCURRENCY: ${SIGNALMESH_WORKER_CONCURRENCY:-4}
       SIGNALMESH_ENABLE_DASHBOARD: ${SIGNALMESH_ENABLE_DASHBOARD:-true}
     volumes:
       - signalmesh-data:/app/data
@@ -26,12 +27,43 @@ services:
       retries: 3
       start_period: 10s
 
-  # Optional PostgreSQL service. Enable with:
-  #   docker compose --profile postgres up
-  # (Scheduling/claim logic is not yet wired to PostgreSQL; see docs/NODE_STRATEGY.md.)
+  # Split deployment: API and worker as independent processes sharing PostgreSQL.
+  #   docker compose --profile split up --build
+  api:
+    build: .
+    image: signalmesh:local
+    profiles: ["split"]
+    command: ["node", "src/api.js"]
+    ports:
+      - "8080:8080"
+    environment: &split-env
+      SIGNALMESH_ENV: ${SIGNALMESH_ENV:-development}
+      SIGNALMESH_STORAGE: postgres
+      DATABASE_URL: postgres://signalmesh:signalmesh@postgres:5432/signalmesh
+      SIGNALMESH_SECRET_ENCRYPTION_KEY: ${SIGNALMESH_SECRET_ENCRYPTION_KEY:-}
+      SIGNALMESH_API_KEY_PEPPER: ${SIGNALMESH_API_KEY_PEPPER:-}
+      SIGNALMESH_ENABLE_DASHBOARD: ${SIGNALMESH_ENABLE_DASHBOARD:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    image: signalmesh:local
+    profiles: ["split"]
+    command: ["node", "src/worker-main.js"]
+    environment:
+      <<: *split-env
+      SIGNALMESH_WORKER_CONCURRENCY: ${SIGNALMESH_WORKER_CONCURRENCY:-4}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
-    profiles: ["postgres"]
+    profiles: ["postgres", "split"]
     environment:
       POSTGRES_DB: signalmesh
       POSTGRES_USER: signalmesh

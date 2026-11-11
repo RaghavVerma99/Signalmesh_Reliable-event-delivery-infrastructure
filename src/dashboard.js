@@ -72,7 +72,7 @@ function renderDashboard() {
     '    var tbody = document.getElementById("events");',
     '    if (!rows.length) { tbody.innerHTML = "<tr><td colspan=\\"4\\" class=\\"muted\\">No events yet.</td></tr>"; return; }',
     '    tbody.innerHTML = rows.map(function (e) {',
-    '      return "<tr><td><code>" + esc(e.event_id) + "</code></td><td>" + esc(e.event_type) + "</td><td>" + esc(e.created_at) + "</td><td>" + esc((e.deliveries || []).length) + "</td></tr>";',
+    '      return "<tr><td><code>" + esc(e.event_id) + "</code></td><td>" + esc(e.event_type) + "</td><td>" + esc(e.created_at) + "</td><td>" + esc(e.delivery_count != null ? e.delivery_count : (e.deliveries || []).length) + "</td></tr>";',
     '    }).join("");',
     '  }',
     '  function renderDeliveries(rows) {',
