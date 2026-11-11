@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const store = require('./store');
 const worker = require('./worker');
 const { genId, stableStringify, hashToken, nowIso } = require('./store');
-const { validateDeliveryUrl, verifyDeliverySignature } = require('./security');
+const { validateDeliveryUrl, verifyDeliverySignature, encryptSecret, decryptSecret } = require('./security');
 const metrics = require('./metrics');
 
 const app = express();
@@ -142,8 +142,17 @@ app.post('/v1/events', (req, res) => {
     store.saveIdempotent(idempotencyKey, fingerprint, { event_id: event.id, status: 'accepted', deliveries_created: deliveries.length });
   }
 
+  // Commit before acknowledging: do not return 202 unless the event and its
+  // deliveries are durably persisted (NFR-001).
+  try {
+    store.persistSync();
+  } catch (persistErr) {
+    log('error', 'event_persist_failed', { event_id: event.id, error: String(persistErr && persistErr.message ? persistErr.message : persistErr) });
+    metrics.inc('events_ingest_errors_total');
+    return res.status(503).json(errorBody('storage_unavailable', 'Could not durably persist event', req.id));
+  }
+
   log('info', 'event_accepted', { event_id: event.id, event_type: event.eventType, deliveries_created: deliveries.length });
-  store.persist();
   return res.status(202).json({ event_id: event.id, status: 'accepted', created_at: event.createdAt, deliveries_created: deliveries.length });
 });
 
@@ -194,8 +203,12 @@ app.post('/v1/endpoints', async (req, res) => {
     return res.status(422).json(errorBody('validation_failed', 'url rejected: ' + deliveryUrlCheck.error, req.id));
   }
   const eventTypes = Array.isArray(body.event_types) ? body.event_types.filter((t) => typeof t === 'string') : ['*'];
-  const timeoutSeconds = typeof body.timeout_seconds === 'number' && body.timeout_seconds > 0 ? body.timeout_seconds : 10;
-  const maxAttempts = typeof body.max_attempts === 'number' && body.max_attempts > 0 ? body.max_attempts : 3;
+  const defaultTimeoutSeconds = Math.max(1, Math.floor((parseInt(process.env.SIGNALMESH_DELIVERY_TIMEOUT_MS || '10000', 10) || 10000) / 1000));
+  const defaultMaxAttempts = Math.max(1, parseInt(process.env.SIGNALMESH_MAX_ATTEMPTS || '8', 10) || 8);
+  const defaultBaseDelayMs = Math.max(0, parseInt(process.env.SIGNALMESH_RETRY_BASE_DELAY_MS || '2000', 10) || 2000);
+  const defaultMaxDelayMs = Math.max(0, parseInt(process.env.SIGNALMESH_RETRY_MAX_DELAY_MS || '3600000', 10) || 3600000);
+  const timeoutSeconds = typeof body.timeout_seconds === 'number' && body.timeout_seconds > 0 ? body.timeout_seconds : defaultTimeoutSeconds;
+  const maxAttempts = typeof body.max_attempts === 'number' && body.max_attempts > 0 ? body.max_attempts : defaultMaxAttempts;
   const signingSecret = 'whsec_' + crypto.randomBytes(4).toString('hex') + crypto.randomBytes(8).toString('hex');
   const endpoint = store.insertEndpoint({
     id: genId('ep'),
@@ -203,11 +216,11 @@ app.post('/v1/endpoints', async (req, res) => {
     url: url,
     eventTypes: eventTypes,
     active: body.active === undefined ? true : !!body.active,
-    signingSecret: signingSecret,
+    signingSecret: encryptSecret(signingSecret),
     timeoutMs: timeoutSeconds * 1000,
     maxAttempts: maxAttempts,
-    baseDelayMs: 1000,
-    maxDelayMs: 30000,
+    baseDelayMs: defaultBaseDelayMs,
+    maxDelayMs: defaultMaxDelayMs,
     createdAt: nowIso(),
     updatedAt: nowIso(),
     deletedAt: null,
@@ -338,7 +351,8 @@ function recordHit(path) {
 app.post('/demo/orders', (req, res) => {
   const deliveryId = req.headers['x-signalmesh-delivery-id'];
   const delivery = store.state.deliveries.find((d) => d.id === deliveryId) || null;
-  const secret = delivery ? (store.state.endpoints.find((e) => e.id === delivery.endpointId) || {}).signingSecret : null;
+  const rawSecret = delivery ? (store.state.endpoints.find((e) => e.id === delivery.endpointId) || {}).signingSecret : null;
+  const secret = rawSecret ? decryptSecret(rawSecret) : null;
   const sig = String(req.headers['x-signalmesh-signature'] || '');
   const ok = !!secret && verifyDeliverySignature(secret, String(req.headers['x-signalmesh-timestamp'] || ''), sig, JSON.stringify(req.body));
   if (!ok) {

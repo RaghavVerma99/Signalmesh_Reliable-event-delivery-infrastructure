@@ -7,6 +7,14 @@ const net = require('net');
 const IS_PRODUCTION = (process.env.SIGNALMESH_ENV || 'development').toLowerCase() === 'production';
 const MAX_RESPONSE_BYTES = Math.max(0, parseInt(process.env.SIGNALMESH_MAX_RESPONSE_BYTES || '16384', 10) || 16384);
 
+const SECRET_ENCRYPTION_KEY_HEX = process.env.SIGNALMESH_SECRET_ENCRYPTION_KEY || '';
+const SECRET_ENCRYPTION_KEY = SECRET_ENCRYPTION_KEY_HEX ? Buffer.from(SECRET_ENCRYPTION_KEY_HEX, 'hex') : null;
+const API_KEY_PEPPER = process.env.SIGNALMESH_API_KEY_PEPPER || '';
+
+if (IS_PRODUCTION && !SECRET_ENCRYPTION_KEY) {
+  throw new Error('SIGNALMESH_SECRET_ENCRYPTION_KEY is required in production');
+}
+
 const blockList = new net.BlockList();
 blockList.addCIDR('10.0.0.0/8');
 blockList.addCIDR('172.16.0.0/12');
@@ -101,6 +109,85 @@ async function validateDeliveryUrl(rawUrl) {
   return { ok: true, ips: resolved.ips, url: parsed.toString() };
 }
 
+/**
+ * Re-check a destination URL immediately before an outbound delivery.
+ *
+ * Defeats DNS rebinding by resolving + validating the connected IP at
+ * delivery time rather than only at registration time. Does not re-apply
+ * the production HTTPS-only policy (that is a registration-time concern);
+ * it only re-applies network-level address/port safety.
+ */
+async function recheckDeliveryDestination(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch (e) {
+    return { ok: false, error: 'invalid_url' };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ok: false, error: 'invalid_protocol' };
+  }
+  const port = parsed.port ? parseInt(parsed.port, 10) : (parsed.protocol === 'https:' ? 443 : 80);
+  if (!Number.isNaN(port) && BLOCKED_OUTBOUND_PORTS.has(port)) {
+    return { ok: false, error: 'blocked_port' };
+  }
+  const hostname = parsed.hostname;
+  if (!hostname) {
+    return { ok: false, error: 'missing_hostname' };
+  }
+  const resolved = await resolveHostname(hostname);
+  if (!resolved.ok) {
+    return { ok: false, error: resolved.error };
+  }
+  for (const ip of resolved.ips) {
+    const loopback = isLoopbackIp(ip);
+    const unsafe = isBlockedIp(ip);
+    if (unsafe && !(loopback && !IS_PRODUCTION)) {
+      return { ok: false, error: 'blocked_address' };
+    }
+  }
+  return { ok: true, ips: resolved.ips, url: parsed.toString() };
+}
+
+function hashApiKey(token) {
+  return crypto.createHmac('sha256', API_KEY_PEPPER).update(token).digest('hex');
+}
+
+function encryptSecret(plaintext) {
+  if (!SECRET_ENCRYPTION_KEY) {
+    // Development-only fallback. Production requires SIGNALMESH_SECRET_ENCRYPTION_KEY.
+    return 'plain:' + plaintext;
+  }
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', SECRET_ENCRYPTION_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return 'enc:' + Buffer.concat([iv, tag, encrypted]).toString('base64');
+}
+
+function decryptSecret(ciphertextB64) {
+  if (typeof ciphertextB64 !== 'string') {
+    return ciphertextB64;
+  }
+  if (ciphertextB64.startsWith('plain:')) {
+    return ciphertextB64.slice('plain:'.length);
+  }
+  if (!ciphertextB64.startsWith('enc:')) {
+    // Legacy plaintext value stored before encryption was introduced.
+    return ciphertextB64;
+  }
+  if (!SECRET_ENCRYPTION_KEY) {
+    throw new Error('SIGNALMESH_SECRET_ENCRYPTION_KEY is required to decrypt this secret');
+  }
+  const data = Buffer.from(ciphertextB64.slice('enc:'.length), 'base64');
+  const iv = data.subarray(0, 12);
+  const tag = data.subarray(12, 28);
+  const encrypted = data.subarray(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', SECRET_ENCRYPTION_KEY, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+}
+
 function signDelivery(secret, timestamp, body) {
   const signature = crypto.createHmac('sha256', secret).update(timestamp + '.' + body).digest('hex');
   return 'v1=' + signature;
@@ -122,6 +209,10 @@ module.exports = {
   isBlockedIp,
   isLoopbackIp,
   validateDeliveryUrl,
+  recheckDeliveryDestination,
+  hashApiKey,
+  encryptSecret,
+  decryptSecret,
   signDelivery,
   verifyDeliverySignature,
 };

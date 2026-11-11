@@ -21,10 +21,28 @@ Full design: [`SIGNALMESH_SPEC.md`](./SIGNALMESH_SPEC.md)
 
 ```bash
 npm install
+npm test        # unit tests (node:test)
 npm start
 ```
 
 Server: http://localhost:8080 (override with `PORT` / `HOST`)
+
+## Configuration
+
+Copy `.env.example` to `.env` and adjust. Key variables:
+
+- `SIGNALMESH_SECRET_ENCRYPTION_KEY` - 32-byte hex key for AES-256-GCM signing-secret encryption (required in production).
+- `SIGNALMESH_API_KEY_PEPPER` - pepper for keyed API-key hashing (required in production).
+- `SIGNALMESH_STORAGE` - `json` (local demo default) or `postgres`.
+- `SIGNALMESH_DELIVERY_TIMEOUT_MS`, `SIGNALMESH_MAX_ATTEMPTS`, `SIGNALMESH_RETRY_BASE_DELAY_MS`, `SIGNALMESH_RETRY_MAX_DELAY_MS` - delivery/retry policy.
+
+For a fast demo that dead-letters within seconds, set `SIGNALMESH_MAX_ATTEMPTS=3` and `SIGNALMESH_RETRY_MAX_DELAY_MS=30000`.
+
+An end-to-end smoke test is available once the server is running:
+
+```bash
+node scripts/smoke.js http://127.0.0.1:8080
+```
 
 ## Quick demo walkthrough
 
@@ -65,7 +83,8 @@ curl localhost:8080/v1/deliveries?status=succeeded \
 
 ## MVP limitations
 
-- Single process, JSON-file persistence (`data/db.json`)
-- Single worker instance, no multi-replica queue
-- No rate limiting, Prometheus, dashboard, or OTel in this build
-- SSRF protections and tenant isolation are out of scope here (demo scope)
+- JSON-file persistence (`data/db.json`) by default; a PostgreSQL store exists but is not yet wired for scheduling/claims.
+- Single worker instance with in-process lease; no multi-replica queue.
+- No rate limiting, dashboard, or OpenTelemetry yet (basic Prometheus `/metrics` exists).
+- Tenant isolation not implemented; all API keys currently share the same data (demo scope).
+- SSRF protection is blocklist-based at registration and delivery time; connected-IP re-check is still pending.

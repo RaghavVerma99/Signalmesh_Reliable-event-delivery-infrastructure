@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { signDelivery, verifyDeliverySignature, validateDeliveryUrl, isBlockedIp } = require('../src/security');
+const { signDelivery, verifyDeliverySignature, validateDeliveryUrl, isBlockedIp, recheckDeliveryDestination, encryptSecret, decryptSecret, hashApiKey } = require('../src/security');
 
 test('hmac sign and verify roundtrip', () => {
   const secret = 'whsec_test_secret';
@@ -39,4 +39,30 @@ test('validateDeliveryUrl rejects unsafe destinations', async () => {
 test('validateDeliveryUrl allows loopback development destination', async () => {
   const res = await validateDeliveryUrl('http://127.0.0.1:8080/demo/orders');
   assert.equal(res.ok, true);
+});
+
+test('encryptSecret/decryptSecret roundtrip', () => {
+  const secret = 'whsec_abc123';
+  const stored = encryptSecret(secret);
+  assert.notEqual(stored, secret);
+  assert.equal(decryptSecret(stored), secret);
+});
+
+test('decryptSecret accepts legacy plaintext secrets', () => {
+  assert.equal(decryptSecret('whsec_legacy_plain'), 'whsec_legacy_plain');
+});
+
+test('hashApiKey is deterministic and peppered', () => {
+  const a = hashApiKey('rel_token_1');
+  const b = hashApiKey('rel_token_1');
+  assert.equal(a, b);
+  assert.notEqual(hashApiKey('rel_token_1'), hashApiKey('rel_token_2'));
+});
+
+test('recheckDeliveryDestination blocks private addresses but allows loopback in dev', async () => {
+  const privateRes = await recheckDeliveryDestination('http://10.0.0.5/hook');
+  assert.equal(privateRes.ok, false);
+  assert.equal(privateRes.error, 'blocked_address');
+  const loopbackRes = await recheckDeliveryDestination('http://127.0.0.1:8080/demo/orders');
+  assert.equal(loopbackRes.ok, true);
 });

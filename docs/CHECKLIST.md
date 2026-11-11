@@ -14,7 +14,7 @@ Companion to SIGNALMESH_SPEC.md. Audits the current MVP implementation and track
 | API surface | Partial | Keys bootstrap, events, deliveries, endpoints (no PATCH), replay/cancel, demo receivers. No revoke route. |
 | Persistence | Partial | JSON file (data/db.json), debounced writes, best-effort. Spec NFR-001 wants durable commit before 202. |
 | Delivery engine | Partial | Single worker, 1s poll, one delivery/tick, in-process lease. Retry defaults deviate from spec suggestions. |
-| Security | Missing | No SSRF protection, redirects not disabled, signature compare not constant-time, no response-size limit, no key-revocation API. |
+| Security | Partial | SSRF blocklist at registration + delivery-time re-check; redirects disabled; constant-time signature compare implemented; response-size cap; encrypted signing secrets; key revocation exists. Still missing: rate limiting, API-key pepper in prod config, audit logging. |
 | Observability | Missing | JSON logs ok; no Prometheus metrics, no OTel, no worker heartbeat/ready check. |
 | Tests / CI / DX | Missing | No tests, no CI workflow, no Docker, no OpenAPI, no CLI/SDK/dashboard. |
 
@@ -42,27 +42,27 @@ Companion to SIGNALMESH_SPEC.md. Audits the current MVP implementation and track
 
 ## 3. MVP scope checklist - SPEC section 4.1
 
-- [ ] API-key authentication - Auth implemented; missing revoke/scopes/rotation exposure.
+- [x] API-key authentication - Auth implemented; revoke route present; scopes/rotation exposure still missing.
 - [ ] Tenant/organization isolation - Missing.
-- [ ] Event ingestion - Implemented.
+- [x] Event ingestion - Implemented.
 - [ ] Event persistence - JSON-file store (not PostgreSQL).
 - [ ] Endpoint registration and management - Missing PATCH endpoint.
-- [ ] Event-type subscriptions - Implemented (* wildcard supported).
+- [x] Event-type subscriptions - Implemented (* wildcard supported).
 - [ ] Delivery creation and dispatch - No transactional outbox pattern.
 - [ ] PostgreSQL-backed worker scheduling - Missing.
 - [ ] Configurable concurrency - Missing (single worker today).
-- [ ] HTTP timeouts - Implemented (default 5s vs. suggested 10s).
-- [ ] Bounded retry with exponential backoff and jitter - Defaults deviate from spec suggestions.
-- [ ] HMAC-SHA256 webhook signatures - Not constant-time comparison.
-- [ ] Delivery and attempt history - Implemented.
-- [ ] Dead-letter state - Implemented.
-- [ ] Manual replay - Implemented; audit fields partial.
+- [x] HTTP timeouts - Implemented (10s default, env-configurable).
+- [ ] Bounded retry with exponential backoff and jitter - Defaults now aligned to spec (8 attempts, 2s base, 1h cap); configurable via env.
+- [x] HMAC-SHA256 webhook signatures - Constant-time comparison implemented (`timingSafeEqual`); signed over `timestamp.body`.
+- [x] Delivery and attempt history - Implemented.
+- [x] Dead-letter state - Implemented.
+- [x] Manual replay - Implemented; audit fields partial.
 - [ ] Basic rate limiting - Missing.
 - [ ] Structured logs - Partial.
-- [ ] Prometheus metrics - Missing.
-- [ ] Health and readiness endpoints - Partial.
+- [ ] Prometheus metrics - Partial (`/metrics` with core counters/gauges/histogram).
+- [ ] Health and readiness endpoints - Partial (no dependency checks / heartbeat).
 - [ ] Docker Compose deployment - Missing.
-- [ ] Unit and integration tests - Missing.
+- [ ] Unit and integration tests - Unit tests added (11 passing); integration/e2e missing.
 
 ## 4. Milestone checklists - SPEC section 17
 
@@ -93,13 +93,13 @@ Companion to SIGNALMESH_SPEC.md. Audits the current MVP implementation and track
 - [ ] Done when: one event to multiple endpoints with isolated failures.
 
 ### Milestone 3 - Reliability
-- [ ] Retry policy and jitter - Defaults deviate.
+- [ ] Retry policy and jitter - Defaults now aligned to spec and env-configurable; retry tests added.
 - [ ] Lease recovery - In-process only.
-- [ ] Dead-letter handling - Done.
-- [ ] Replay - Done.
-- [ ] HMAC signatures - Not constant-time.
+- [x] Dead-letter handling - Done.
+- [x] Replay - Done.
+- [x] HMAC signatures - Implemented with constant-time verification.
 - [ ] Rate limiting - Missing.
-- [ ] SSRF protections - Missing.
+- [ ] SSRF protections - Registration + delivery-time blocklist/re-check done; DNS-rebinding-aware connected-IP check and tests still needed.
 - [ ] Done when: documented failure-injection suite passes.
 
 ### Milestone 4 - Operability
@@ -154,3 +154,26 @@ Companion to SIGNALMESH_SPEC.md. Audits the current MVP implementation and track
 4. Ops and DX scaffolding - Docker Compose, CI, config loader, .env.example, OpenAPI, docs.
 5. Delivery engine maturity - outbox, PostgreSQL scheduling, safe claims, concurrency.
 6. Product completeness - PATCH endpoint, rate limiting, audit logging, idempotency expiry, cursor pagination, replay audit.
+
+## 9. Node.js continuation + Phase 1 status (2026-11-11)
+
+Decision: continue on Node.js; PostgreSQL is the target durable store (JSON remains local-dev fallback). See `docs/NODE_STRATEGY.md`.
+
+Phase 1 security fixes completed in this pass:
+
+- [x] Delivery-time SSRF re-check in worker (`recheckDeliveryDestination`).
+- [x] Signing secrets encrypted at rest (AES-256-GCM; `plain:` dev fallback; `enc:` stored form).
+- [x] API-key hashing switched to keyed HMAC-SHA256 with `SIGNALMESH_API_KEY_PEPPER`.
+- [x] Constant-time signature comparison confirmed + tested.
+- [x] Response-body cap enforced in worker excerpt.
+- [x] Durable persist before `202 Accepted` (`persistSync`, returns `503` if persist fails).
+- [x] Retry/timeout defaults aligned to spec and env-configurable.
+- [x] Test script added (`npm test`) - 11 tests passing.
+- [x] `.env.example` and end-to-end smoke script (`scripts/smoke.js`).
+
+Remaining before feature work:
+
+- [ ] Add API-key pepper + encryption key to production config validation / docs.
+- [ ] Enforce connected-IP check (not just resolved IP) for full DNS-rebinding defense.
+- [ ] Add tenant scoping so keys cannot see each other's data.
+- [ ] Repair and wire `src/storage/postgres.js` with migrations + indexes.

@@ -3,10 +3,11 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { createPostgresStoreFromEnv } = require('./storage/postgres');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'db.json');
+
+const API_KEY_PEPPER = process.env.SIGNALMESH_API_KEY_PEPPER || '';
 
 function nowIso() {
   return new Date().toISOString();
@@ -25,6 +26,10 @@ function stableStringify(value) {
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function hashApiKey(token) {
+  return crypto.createHmac('sha256', API_KEY_PEPPER).update(token).digest('hex');
 }
 
 function blankState() {
@@ -60,6 +65,11 @@ function persist() {
   }
 }
 
+function persistSync() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(DATA_FILE, JSON.stringify(state));
+}
+
 function schedulePersist() {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
@@ -78,7 +88,7 @@ const store = {
     const rec = {
       id: genId('key'),
       name: name || 'default',
-      keyHash: hashToken(key),
+      keyHash: hashApiKey(key),
       prefix: key.slice(0, 12),
       createdAt: nowIso(),
       revokedAt: null,
@@ -89,7 +99,7 @@ const store = {
   },
 
   findKeyByToken(token) {
-    const hash = hashToken(token);
+    const hash = hashApiKey(token);
     const rec = state.keys.find((k) => k.keyHash === hash && !k.revokedAt);
     return rec || null;
   },
@@ -181,12 +191,15 @@ const store = {
   },
 };
 
-const storeImpl = process.env.SIGNALMESH_STORAGE === 'postgres' ? createPostgresStoreFromEnv() : store;
+const usePostgres = process.env.SIGNALMESH_STORAGE === 'postgres';
+const storeImpl = usePostgres ? require('./storage/postgres').createPostgresStoreFromEnv() : store;
 
 module.exports = storeImpl;
 module.exports.genId = genId;
 module.exports.stableStringify = stableStringify;
 module.exports.hashToken = hashToken;
+module.exports.hashApiKey = hashApiKey;
 module.exports.nowIso = nowIso;
 module.exports.persist = typeof storeImpl.persist === 'function' ? storeImpl.persist.bind(storeImpl) : (async () => {});
+module.exports.persistSync = process.env.SIGNALMESH_STORAGE === 'postgres' ? (async () => {}) : persistSync;
 module.exports.state = storeImpl.state;

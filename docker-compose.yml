@@ -1,0 +1,51 @@
+services:
+  signalmesh:
+    build: .
+    image: signalmesh:local
+    ports:
+      - "8080:8080"
+    environment:
+      SIGNALMESH_ENV: ${SIGNALMESH_ENV:-development}
+      PORT: "8080"
+      SIGNALMESH_STORAGE: ${SIGNALMESH_STORAGE:-json}
+      # Generate these for anything beyond a local demo:
+      #   openssl rand -hex 32
+      SIGNALMESH_SECRET_ENCRYPTION_KEY: ${SIGNALMESH_SECRET_ENCRYPTION_KEY:-}
+      SIGNALMESH_API_KEY_PEPPER: ${SIGNALMESH_API_KEY_PEPPER:-}
+      SIGNALMESH_MAX_ATTEMPTS: ${SIGNALMESH_MAX_ATTEMPTS:-8}
+      SIGNALMESH_RETRY_BASE_DELAY_MS: ${SIGNALMESH_RETRY_BASE_DELAY_MS:-2000}
+      SIGNALMESH_RETRY_MAX_DELAY_MS: ${SIGNALMESH_RETRY_MAX_DELAY_MS:-3600000}
+      SIGNALMESH_ENABLE_DASHBOARD: ${SIGNALMESH_ENABLE_DASHBOARD:-true}
+    volumes:
+      - signalmesh-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # Optional PostgreSQL service. Enable with:
+  #   docker compose --profile postgres up
+  # (Scheduling/claim logic is not yet wired to PostgreSQL; see docs/NODE_STRATEGY.md.)
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_DB: signalmesh
+      POSTGRES_USER: signalmesh
+      POSTGRES_PASSWORD: signalmesh
+    ports:
+      - "5432:5432"
+    volumes:
+      - signalmesh-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signalmesh -d signalmesh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  signalmesh-data:
+  signalmesh-pg:

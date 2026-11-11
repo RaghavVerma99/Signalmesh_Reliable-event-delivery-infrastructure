@@ -2,15 +2,15 @@
 
 const store = require('./store');
 const { nowIso } = require('./store');
-const { signDelivery, MAX_RESPONSE_BYTES } = require('./security');
+const { signDelivery, decryptSecret, recheckDeliveryDestination, MAX_RESPONSE_BYTES } = require('./security');
 const metrics = require('./metrics');
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
-const DEFAULT_TIMEOUT_MS = 5000;
-const DEFAULT_MAX_ATTEMPTS = 3;
-const DEFAULT_BASE_DELAY_MS = 1000;
-const DEFAULT_MAX_DELAY_MS = 30000;
-const LEASE_MS = 15000;
+const DEFAULT_TIMEOUT_MS = Math.max(1, parseInt(process.env.SIGNALMESH_DELIVERY_TIMEOUT_MS || '10000', 10) || 10000);
+const DEFAULT_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.SIGNALMESH_MAX_ATTEMPTS || '8', 10) || 8);
+const DEFAULT_BASE_DELAY_MS = Math.max(0, parseInt(process.env.SIGNALMESH_RETRY_BASE_DELAY_MS || '2000', 10) || 2000);
+const DEFAULT_MAX_DELAY_MS = Math.max(0, parseInt(process.env.SIGNALMESH_RETRY_MAX_DELAY_MS || '3600000', 10) || 3600000);
+const LEASE_MS = Math.max(1, parseInt(process.env.SIGNALMESH_WORKER_LEASE_MS || '15000', 10) || 15000);
 
 function computeBackoffMs(attemptNumber, baseDelayMs, maxDelayMs) {
   const exp = Math.max(0, attemptNumber - 1);
@@ -69,7 +69,16 @@ async function runAttempt(delivery) {
 
       const body = JSON.stringify(envelope);
       const timestamp = Math.floor(Date.now() / 1000);
-      const signature = signDelivery(endpoint.signingSecret, timestamp, body);
+      const signature = signDelivery(decryptSecret(endpoint.signingSecret), timestamp, body);
+
+      // Re-validate the destination immediately before connecting to defeat
+      // DNS rebinding between registration and delivery (NFR-006 / 12.2 #5).
+      const destCheck = await recheckDeliveryDestination(endpoint.url);
+      if (!destCheck.ok) {
+        const blocked = new Error('destination_blocked: ' + destCheck.error);
+        blocked.code = 'destination_blocked';
+        throw blocked;
+      }
 
       const res = await fetch(endpoint.url, {
         method: 'POST',
@@ -113,11 +122,16 @@ async function runAttempt(delivery) {
   } catch (err) {
     attempt.finishedAt = new Date().toISOString();
     attempt.durationMs = Date.now() - startedAtMs;
-    const errorClass = err && err.name === 'TimeoutError' ? 'timeout' : 'network';
-    if (attemptNumber >= maxAttempts) {
-      outcome = { type: 'dead', error: 'retry_exhausted', statusCode: null, responseExcerpt: null };
+    if (err && err.code === 'destination_blocked') {
+      // Destination failed the delivery-time SSRF check: permanent, never retry.
+      outcome = { type: 'dead', error: 'destination_blocked', statusCode: null, responseExcerpt: null };
     } else {
-      outcome = { type: 'retry', error: errorClass, statusCode: null, responseExcerpt: null, delayMs: computeBackoffMs(attemptNumber, baseDelayMs, maxDelayMs) };
+      const errorClass = err && err.name === 'TimeoutError' ? 'timeout' : 'network';
+      if (attemptNumber >= maxAttempts) {
+        outcome = { type: 'dead', error: 'retry_exhausted', statusCode: null, responseExcerpt: null };
+      } else {
+        outcome = { type: 'retry', error: errorClass, statusCode: null, responseExcerpt: null, delayMs: computeBackoffMs(attemptNumber, baseDelayMs, maxDelayMs) };
+      }
     }
   }
 
