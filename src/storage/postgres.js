@@ -1,202 +1,529 @@
 'use strict';
 
 const { Pool } = require('pg');
+const { nowIso, genId, hashApiKey } = require('../util');
+const { runMigrations } = require('./migrate');
 
-function createPostgresStore(config) {
-  const pool = new Pool({
-    host: config.host,
-    port: config.port,
-    database: config.database,
-    user: config.user,
-    password: config.password,
-    ssl: config.ssl,
-  });
+function iso(value) {
+  return value ? new Date(value).toISOString() : null;
+}
 
-  async function init() {
-    await pool.query(`CREATE TABLE IF NOT EXISTS api_keys (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      key_hash TEXT NOT NULL,
-      prefix TEXT NOT NULL,
-      created_at TEXT,
-      revoked_at TEXT
-    )`);
-    await pool.query(`CREATE TABLE IF NOT EXISTS events (
-      id TEXT PRIMARY KEY,
-      event_type TEXT NOT NULL,
-      data TEXT NOT NULL,
-      occurred_at TEXT,
-      metadata TEXT,
-      created_at TEXT NOT NULL
-    )`);
-    await pool.query(`CREATE TABLE IF NOT EXISTS endpoints (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      url TEXT NOT NULL,
-      event_types TEXT,
-      active BOOLEAN NOT NULL,
-      signing_secret TEXT NOT NULL,
-      timeout_ms INTEGER NOT NULL,
-      max_attempts INTEGER NOT NULL,
-      base_delay_ms INTEGER NOT NULL,
-      max_delay_ms INTEGER NOT NULL,
-      created_at TEXT,
-      updated_at TEXT,
-      deleted_at TEXT
-    )`);
-    await pool.query(`CREATE TABLE IF NOT EXISTS deliveries (
-      id TEXT PRIMARY KEY,
-      event_id TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      endpoint_id TEXT NOT NULL,
-      status TEXT NOT NULL,
-      attempt_count INTEGER NOT NULL,
-      next_attempt_at TEXT,
-      last_status_code INTEGER,
-      last_error TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT,
-      locked_until TEXT
-    )`);
-    await pool.query(`CREATE TABLE IF NOT EXISTS delivery_attempts (
-      id TEXT PRIMARY KEY,
-      delivery_id TEXT NOT NULL,
-      attempt_number INTEGER NOT NULL,
-      started_at TEXT,
-      finished_at TEXT,
-      status_code INTEGER,
-      duration_ms INTEGER,
-      error_class TEXT,
-      response_excerpt TEXT
-    )`);
-    await pool.query(`CREATE TABLE IF NOT EXISTS idempotency_records (
-      key TEXT PRIMARY KEY,
-      request_hash TEXT NOT NULL,
-      response_body TEXT NOT NULL,
-      created_at TEXT
-    )`);
-  }
-
-  async function createKey(name) {
-    const id = 'key_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-    const key = 'rel_' + Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 14);
-    const keyHash = 'hash_' + key;
-    const prefix = key.slice(0, 12);
-    const createdAt = new Date().toISOString();
-    await pool.query('INSERT INTO api_keys (id, name, key_hash, prefix, created_at) VALUES ($1, $2, $3, $4, $5)', [id, name || 'default', keyHash, prefix, createdAt]);
-    return { id: id, name: name || 'default', key: key, prefix: prefix, createdAt: createdAt };
-  }
-
-  async function findKeyByToken(token) {
-    const keyHash = 'hash_' + token;
-    const res = await pool.query('SELECT * FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL LIMIT 1', [keyHash]);
-    const row = res.rows[0];
-    if (!row) return null;
-    return { id: row.id, name: row.name, key: token, prefix: row.prefix, createdAt: row.created_at };
-  }
-
-  async function revokeKey(id) {
-    const res = await pool.query('UPDATE api_keys SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL RETURNING *', [id, new Date().toISOString()]);
-    const row = res.rows[0];
-    if (!row) {
-      const all = await pool.query('SELECT * FROM api_keys WHERE id = $1', [id]);
-      return all.rows[0] || null;
-    }
-    return { id: row.id, name: row.name, revokedAt: row.revoked_at };
-  }
-
-  async function insertEvent(event) {
-    await pool.query('INSERT INTO events (id, event_type, data, occurred_at, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6)', [event.id, event.eventType, JSON.stringify(event.data || {}), event.occurredAt || null, event.metadata ? JSON.stringify(event.metadata) : null, event.createdAt]);
-  }
-
-  async function listEvents(filter) {
-    const res = await pool.query('SELECT * FROM events ORDER BY created_at DESC LIMIT $1', [filter && filter.limit ? Math.min(parseInt(filter.limit, 10) || 50, 200) : 50]);
-    const data = res.rows.map((e) => ({ id: e.id, eventType: e.event_type, data: e.data ? JSON.parse(e.data) : {}, occurredAt: e.occurred_at, metadata: e.metadata ? JSON.parse(e.metadata) : {}, createdAt: e.created_at }));
-    return { data: data, next_cursor: null, total: data.length };
-  }
-
-  async function insertDelivery(delivery) {
-    await pool.query('INSERT INTO deliveries (id, event_id, event_type, endpoint_id, status, attempt_count, next_attempt_at, last_status_code, last_error, created_at, updated_at, locked_until) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)', [delivery.id, delivery.eventId, delivery.eventType, delivery.endpointId, delivery.status, delivery.attemptCount || 0, delivery.nextAttemptAt || null, delivery.lastStatusCode || null, delivery.lastError || null, delivery.createdAt, delivery.updatedAt, delivery.lockedUntil || null]);
-  }
-
-  async function listDeliveries(filter) {
-    const res = await pool.query('SELECT * FROM deliveries ORDER BY created_at DESC LIMIT $1', [filter && filter.limit ? Math.min(parseInt(filter.limit, 10) || 50, 200) : 50]);
-    const data = res.rows.map((d) => ({ id: d.id, eventId: d.event_id, eventType: d.event_type, endpointId: d.endpoint_id, status: d.status, attemptCount: d.attempt_count, nextAttemptAt: d.next_attempt_at, lastStatusCode: d.last_status_code, lastError: d.last_error, createdAt: d.created_at, updatedAt: d.updated_at }));
-    return { data: data, next_cursor: null, total: data.length };
-  }
-
-  async function getDelivery(id) {
-    const res = await pool.query('SELECT * FROM deliveries WHERE id = $1', [id]);
-    const row = res.rows[0];
-    if (!row) return null;
-    const evRes = await pool.query('SELECT * FROM events WHERE id = $1', [row.event_id]);
-    const epRes = await pool.query('SELECT * FROM endpoints WHERE id = $1', [row.endpoint_id]);
-    return { delivery: row, event: evRes.rows[0] || null, endpoint: epRes.rows[0] || null };
-  }
-
-  async function insertEndpoint(endpoint) {
-    await pool.query('INSERT INTO endpoints (id, name, url, event_types, active, signing_secret, timeout_ms, max_attempts, base_delay_ms, max_delay_ms, created_at, updated_at, deleted_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)', [endpoint.id, endpoint.name, endpoint.url, endpoint.eventTypes ? JSON.stringify(endpoint.eventTypes) : null, endpoint.active, endpoint.signingSecret, endpoint.timeoutMs, endpoint.maxAttempts, endpoint.baseDelayMs, endpoint.maxDelayMs, endpoint.createdAt, endpoint.updatedAt, endpoint.deletedAt || null]);
-  }
-
-  async function listEndpoints() {
-    const res = await pool.query('SELECT * FROM endpoints ORDER BY created_at DESC');
-    return res.rows.map((e) => e);
-  }
-
-  async function getEndpoint(id) {
-    const res = await pool.query('SELECT * FROM endpoints WHERE id = $1', [id]);
-    const row = res.rows[0];
-    if (!row) return null;
-    return row;
-  }
-
-  async function softDeleteEndpoint(id) {
-    const res = await pool.query('UPDATE endpoints SET active = false, deleted_at = $2 WHERE id = $1 RETURNING *', [id, new Date().toISOString()]);
-    const row = res.rows[0];
-    return row || null;
-  }
-
-  async function findIdempotent(key) {
-    const res = await pool.query('SELECT * FROM idempotency_records WHERE key = $1', [key]);
-    const row = res.rows[0];
-    if (!row) return null;
-    return { requestHash: row.request_hash, responseBody: row.response_body ? JSON.parse(row.response_body) : null };
-  }
-
-  async function saveIdempotent(key, requestHash, responseBody) {
-    await pool.query('INSERT INTO idempotency_records (key, request_hash, response_body, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT (key) DO UPDATE SET request_hash = $2, response_body = $3, created_at = $4', [key, requestHash, JSON.stringify(responseBody), new Date().toISOString()]);
-  }
-
+function mapEvent(row) {
   return {
-    init,
-    createKey,
-    findKeyByToken,
-    revokeKey,
-    insertEvent,
-    listEvents,
-    insertDelivery,
-    listDeliveries,
-    getDelivery,
-    insertEndpoint,
-    listEndpoints,
-    getEndpoint,
-    softDeleteEndpoint,
-    findIdempotent,
-    saveIdempotent,
-    state: { keys: [], events: [], endpoints: [], deliveries: [], idempotency: {} },
-    persist: async () => {},
+    id: row.id,
+    organizationId: row.organization_id,
+    eventType: row.event_type,
+    data: row.data || {},
+    occurredAt: iso(row.occurred_at),
+    metadata: row.metadata || {},
+    createdAt: iso(row.created_at),
+    deliveries: [],
   };
 }
 
-function createPostgresStoreFromEnv() {
-  return createPostgresStore({
-    host: process.env.SIGNALMESH_DB_HOST || 'localhost',
-    port: parseInt(process.env.SIGNALMESH_DB_PORT || '5432', 10),
-    database: process.env.SIGNALMESH_DB_NAME || 'signalmesh',
-    user: process.env.SIGNALMESH_DB_USER || 'signalmesh',
-    password: process.env.SIGNALMESH_DB_PASSWORD || 'signalmesh',
-    ssl: process.env.SIGNALMESH_DB_SSL === 'true',
-  });
+function mapEndpoint(row) {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    name: row.name,
+    url: row.url,
+    eventTypes: row.event_types || ['*'],
+    active: row.active,
+    signingSecret: row.signing_secret,
+    timeoutMs: row.timeout_ms,
+    maxAttempts: row.max_attempts,
+    baseDelayMs: row.base_delay_ms,
+    maxDelayMs: row.max_delay_ms,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    deletedAt: iso(row.deleted_at),
+  };
 }
 
-module.exports = { createPostgresStore, createPostgresStoreFromEnv };
+function mapDelivery(row) {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    eventId: row.event_id,
+    eventType: row.event_type,
+    endpointId: row.endpoint_id,
+    status: row.status,
+    attemptCount: row.attempt_count,
+    nextAttemptAt: iso(row.next_attempt_at),
+    lockedBy: row.locked_by,
+    lockedUntil: iso(row.locked_until),
+    lastStatusCode: row.last_status_code,
+    lastError: row.last_error,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    attempts: [],
+  };
+}
+
+function createStore(config) {
+  const poolConfig = config.connectionString
+    ? { connectionString: config.connectionString, ssl: config.ssl ? { rejectUnauthorized: false } : false, max: config.max || 10 }
+    : {
+        host: config.host,
+        port: config.port,
+        database: config.database,
+        user: config.user,
+        password: config.password,
+        ssl: config.ssl ? { rejectUnauthorized: false } : false,
+        max: config.max || 10,
+      };
+  const pool = new Pool(poolConfig);
+
+  function log(level, msg, fields) {
+    if (process.env.SIGNALMESH_LOG_LEVEL === 'silent') return;
+    console.log(JSON.stringify(Object.assign({ ts: nowIso(), level, msg }, fields || {})));
+  }
+
+  return {
+    kind: 'postgres',
+
+    async init() {
+      await runMigrations(pool, log);
+    },
+
+    async close() {
+      await pool.end();
+    },
+
+    async ping() {
+      await pool.query('SELECT 1');
+      return true;
+    },
+
+    // ---- organizations -------------------------------------------------
+    async createOrganization(name) {
+      const org = { id: genId('org'), name: name || 'default', createdAt: nowIso() };
+      await pool.query('INSERT INTO organizations (id, name, created_at) VALUES ($1, $2, $3)', [org.id, org.name, org.createdAt]);
+      return org;
+    },
+
+    async ensureOrganization(name, id) {
+      if (id) {
+        const byId = await pool.query('SELECT * FROM organizations WHERE id = $1', [id]);
+        if (byId.rowCount) return { id: byId.rows[0].id, name: byId.rows[0].name, createdAt: iso(byId.rows[0].created_at) };
+      }
+      if (name) {
+        const byName = await pool.query('SELECT * FROM organizations WHERE name = $1', [name]);
+        if (byName.rowCount) return { id: byName.rows[0].id, name: byName.rows[0].name, createdAt: iso(byName.rows[0].created_at) };
+      }
+      return this.createOrganization(name);
+    },
+
+    async getOrganization(id) {
+      const res = await pool.query('SELECT * FROM organizations WHERE id = $1', [id]);
+      return res.rowCount ? { id: res.rows[0].id, name: res.rows[0].name, createdAt: iso(res.rows[0].created_at) } : null;
+    },
+
+    // ---- API keys ------------------------------------------------------
+    async createKey(input) {
+      const key = 'rel_' + require('crypto').randomBytes(4).toString('hex') + require('crypto').randomBytes(12).toString('hex');
+      const rec = {
+        id: genId('key'),
+        organizationId: input.organizationId,
+        name: input.name || 'default',
+        keyHash: hashApiKey(key),
+        prefix: key.slice(0, 12),
+        scopes: input.scopes || ['admin'],
+        createdAt: nowIso(),
+        revokedAt: null,
+      };
+      await pool.query(
+        'INSERT INTO api_keys (id, organization_id, name, key_hash, prefix, scopes, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [rec.id, rec.organizationId, rec.name, rec.keyHash, rec.prefix, JSON.stringify(rec.scopes), rec.createdAt]
+      );
+      return { id: rec.id, name: rec.name, key, prefix: rec.prefix, scopes: rec.scopes, organizationId: rec.organizationId, createdAt: rec.createdAt };
+    },
+
+    async findKeyByToken(token) {
+      const hash = hashApiKey(token);
+      const res = await pool.query('SELECT * FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL LIMIT 1', [hash]);
+      if (!res.rowCount) return null;
+      const row = res.rows[0];
+      return {
+        id: row.id,
+        organizationId: row.organization_id,
+        name: row.name,
+        prefix: row.prefix,
+        scopes: row.scopes,
+        createdAt: iso(row.created_at),
+        revokedAt: iso(row.revoked_at),
+      };
+    },
+
+    async revokeKey(id, organizationId) {
+      const res = await pool.query(
+        'UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND organization_id = $2 AND revoked_at IS NULL RETURNING *',
+        [id, organizationId]
+      );
+      if (!res.rowCount) {
+        const existing = await pool.query('SELECT * FROM api_keys WHERE id = $1 AND organization_id = $2', [id, organizationId]);
+        return existing.rowCount ? { id: existing.rows[0].id, name: existing.rows[0].name, revokedAt: iso(existing.rows[0].revoked_at) } : null;
+      }
+      const row = res.rows[0];
+      return { id: row.id, name: row.name, revokedAt: iso(row.revoked_at) };
+    },
+
+    async listKeys(organizationId) {
+      const res = await pool.query('SELECT * FROM api_keys WHERE organization_id = $1 ORDER BY created_at DESC', [organizationId]);
+      return res.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        prefix: row.prefix,
+        scopes: row.scopes,
+        createdAt: iso(row.created_at),
+        revokedAt: iso(row.revoked_at),
+      }));
+    },
+
+    async countKeys() {
+      const res = await pool.query('SELECT count(*)::int AS n FROM api_keys');
+      return res.rows[0].n;
+    },
+
+    // ---- events + atomic ingest ---------------------------------------
+    async ingestEvent(input) {
+      const { event, deliveries, idempotency } = input;
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        if (idempotency) {
+          const existing = await client.query(
+            'SELECT request_hash, response_body FROM idempotency_records WHERE organization_id = $1 AND operation = $2 AND idempotency_key = $3',
+            [idempotency.organizationId, idempotency.operation, idempotency.key]
+          );
+          if (existing.rowCount) {
+            await client.query('ROLLBACK');
+            if (existing.rows[0].request_hash !== idempotency.requestHash) return { status: 'conflict' };
+            return { status: 'duplicate', responseBody: existing.rows[0].response_body };
+          }
+        }
+
+        await client.query(
+          'INSERT INTO events (id, organization_id, event_type, data, occurred_at, metadata, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+          [event.id, event.organizationId, event.eventType, JSON.stringify(event.data || {}), event.occurredAt || null, JSON.stringify(event.metadata || {}), event.createdAt]
+        );
+
+        for (const d of deliveries) {
+          await client.query(
+            'INSERT INTO deliveries (id, organization_id, event_id, event_type, endpoint_id, status, attempt_count, next_attempt_at, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+            [d.id, d.organizationId, d.eventId, d.eventType, d.endpointId, d.status, d.attemptCount || 0, d.nextAttemptAt || null, d.createdAt, d.updatedAt]
+          );
+        }
+
+        if (idempotency) {
+          await client.query(
+            'INSERT INTO idempotency_records (id, organization_id, operation, idempotency_key, request_hash, response_status, response_body, expires_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+            [genId('idem'), idempotency.organizationId, idempotency.operation, idempotency.key, idempotency.requestHash, idempotency.responseStatus || 202, JSON.stringify(idempotency.responseBody || null), idempotency.expiresAt || null, nowIso()]
+          );
+        }
+
+        await client.query('COMMIT');
+        return { status: 'created', event, deliveries };
+      } catch (err) {
+        await client.query('ROLLBACK');
+        if (err && err.code === '23505' && idempotency) {
+          const existing = await pool.query(
+            'SELECT request_hash, response_body FROM idempotency_records WHERE organization_id = $1 AND operation = $2 AND idempotency_key = $3',
+            [idempotency.organizationId, idempotency.operation, idempotency.key]
+          );
+          if (existing.rowCount) {
+            if (existing.rows[0].request_hash !== idempotency.requestHash) return { status: 'conflict' };
+            return { status: 'duplicate', responseBody: existing.rows[0].response_body };
+          }
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+
+    async listEvents(filter) {
+      const f = filter || {};
+      const params = [f.organizationId];
+      const where = ['organization_id = $1'];
+      if (f.eventType) {
+        params.push(f.eventType);
+        where.push('event_type = $' + params.length);
+      }
+      if (f.cursor) {
+        params.push(f.cursor);
+        where.push('created_at < $' + params.length);
+      }
+      const limit = Math.min(Math.max(1, parseInt(f.limit, 10) || 50), 200);
+      params.push(limit + 1);
+      const res = await pool.query(
+        'SELECT * FROM events WHERE ' + where.join(' AND ') + ' ORDER BY created_at DESC LIMIT $' + params.length,
+        params
+      );
+      const rows = res.rows.slice(0, limit).map(mapEvent);
+      const next = res.rows.length > limit ? rows[rows.length - 1].createdAt : null;
+      const count = await pool.query('SELECT count(*)::int AS n FROM events WHERE organization_id = $1' + (f.eventType ? ' AND event_type = $2' : ''), f.eventType ? [f.organizationId, f.eventType] : [f.organizationId]);
+      return { data: rows, next_cursor: next, total: count.rows[0].n };
+    },
+
+    async getEvent(id, organizationId) {
+      const res = await pool.query(
+        'SELECT * FROM events WHERE id = $1' + (organizationId ? ' AND organization_id = $2' : ''),
+        organizationId ? [id, organizationId] : [id]
+      );
+      return res.rowCount ? mapEvent(res.rows[0]) : null;
+    },
+
+    async getEventForWorker(id) {
+      return this.getEvent(id, null);
+    },
+
+    // ---- endpoints -----------------------------------------------------
+    async insertEndpoint(endpoint) {
+      await pool.query(
+        'INSERT INTO endpoints (id, organization_id, name, url, event_types, active, signing_secret, timeout_ms, max_attempts, base_delay_ms, max_delay_ms, created_at, updated_at, deleted_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)',
+        [endpoint.id, endpoint.organizationId, endpoint.name, endpoint.url, JSON.stringify(endpoint.eventTypes || ['*']), endpoint.active, endpoint.signingSecret, endpoint.timeoutMs, endpoint.maxAttempts, endpoint.baseDelayMs, endpoint.maxDelayMs, endpoint.createdAt, endpoint.updatedAt, endpoint.deletedAt || null]
+      );
+      return endpoint;
+    },
+
+    async listEndpoints(organizationId) {
+      const res = await pool.query('SELECT * FROM endpoints WHERE organization_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC', [organizationId]);
+      return res.rows.map(mapEndpoint);
+    },
+
+    async getEndpoint(id, organizationId) {
+      const res = await pool.query(
+        'SELECT * FROM endpoints WHERE id = $1 AND deleted_at IS NULL' + (organizationId ? ' AND organization_id = $2' : ''),
+        organizationId ? [id, organizationId] : [id]
+      );
+      return res.rowCount ? mapEndpoint(res.rows[0]) : null;
+    },
+
+    async getEndpointForWorker(id) {
+      return this.getEndpoint(id, null);
+    },
+
+    async updateEndpoint(id, organizationId, patch) {
+      const columns = {
+        name: 'name',
+        url: 'url',
+        eventTypes: 'event_types',
+        active: 'active',
+        timeoutMs: 'timeout_ms',
+        maxAttempts: 'max_attempts',
+        baseDelayMs: 'base_delay_ms',
+        maxDelayMs: 'max_delay_ms',
+      };
+      const sets = [];
+      const params = [id, organizationId];
+      for (const key of Object.keys(columns)) {
+        if (patch[key] === undefined) continue;
+        const value = key === 'eventTypes' ? JSON.stringify(patch[key]) : patch[key];
+        params.push(value);
+        sets.push(columns[key] + ' = $' + params.length);
+      }
+      if (!sets.length) return this.getEndpoint(id, organizationId);
+      sets.push('updated_at = now()');
+      const res = await pool.query(
+        'UPDATE endpoints SET ' + sets.join(', ') + ' WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL RETURNING *',
+        params
+      );
+      return res.rowCount ? mapEndpoint(res.rows[0]) : null;
+    },
+
+    async softDeleteEndpoint(id, organizationId) {
+      const res = await pool.query(
+        'UPDATE endpoints SET active = false, deleted_at = now(), updated_at = now() WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL RETURNING *',
+        [id, organizationId]
+      );
+      return res.rowCount ? mapEndpoint(res.rows[0]) : null;
+    },
+
+    // ---- deliveries ----------------------------------------------------
+    async insertDelivery(delivery) {
+      await pool.query(
+        'INSERT INTO deliveries (id, organization_id, event_id, event_type, endpoint_id, status, attempt_count, next_attempt_at, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+        [delivery.id, delivery.organizationId, delivery.eventId, delivery.eventType, delivery.endpointId, delivery.status, delivery.attemptCount || 0, delivery.nextAttemptAt || null, delivery.createdAt, delivery.updatedAt]
+      );
+      return delivery;
+    },
+
+    async listDeliveries(filter) {
+      const f = filter || {};
+      const baseParams = [f.organizationId];
+      const baseWhere = ['organization_id = $1'];
+      const add = (column, value) => {
+        baseParams.push(value);
+        baseWhere.push(column + ' = $' + baseParams.length);
+      };
+      if (f.status) add('status', f.status);
+      if (f.eventId) add('event_id', f.eventId);
+      if (f.endpointId) add('endpoint_id', f.endpointId);
+      if (f.deliveryId) add('id', f.deliveryId);
+
+      // Cursor applies to the page query only; the total is the full filtered set.
+      const pageParams = baseParams.slice();
+      const pageWhere = baseWhere.slice();
+      if (f.cursor) {
+        pageParams.push(f.cursor);
+        pageWhere.push('created_at < $' + pageParams.length);
+      }
+      const limit = Math.min(Math.max(1, parseInt(f.limit, 10) || 50), 200);
+      pageParams.push(limit + 1);
+
+      const res = await pool.query(
+        'SELECT * FROM deliveries WHERE ' + pageWhere.join(' AND ') + ' ORDER BY created_at DESC LIMIT $' + pageParams.length,
+        pageParams
+      );
+      const rows = res.rows.slice(0, limit).map(mapDelivery);
+      const next = res.rows.length > limit ? rows[rows.length - 1].createdAt : null;
+      const count = await pool.query('SELECT count(*)::int AS n FROM deliveries WHERE ' + baseWhere.join(' AND '), baseParams);
+      return { data: rows, next_cursor: next, total: count.rows[0].n };
+    },
+
+    async getDelivery(id, organizationId) {
+      const res = await pool.query(
+        'SELECT * FROM deliveries WHERE id = $1' + (organizationId ? ' AND organization_id = $2' : ''),
+        organizationId ? [id, organizationId] : [id]
+      );
+      if (!res.rowCount) return null;
+      const delivery = mapDelivery(res.rows[0]);
+      const event = await this.getEvent(delivery.eventId, null);
+      const endpoint = await this.getEndpoint(delivery.endpointId, null);
+      return { delivery, event, endpoint };
+    },
+
+    async updateDelivery(id, organizationId, patch) {
+      const sets = [];
+      const params = [id, organizationId];
+      const map = { status: 'status', nextAttemptAt: 'next_attempt_at', lastStatusCode: 'last_status_code', lastError: 'last_error' };
+      for (const key of Object.keys(map)) {
+        if (patch[key] === undefined) continue;
+        params.push(patch[key]);
+        sets.push(map[key] + ' = $' + params.length);
+      }
+      if (!sets.length) return (await this.getDelivery(id, organizationId)).delivery;
+      sets.push('updated_at = now()');
+      const res = await pool.query(
+        'UPDATE deliveries SET ' + sets.join(', ') + ' WHERE id = $1 AND organization_id = $2 RETURNING *',
+        params
+      );
+      return res.rowCount ? mapDelivery(res.rows[0]) : null;
+    },
+
+    async claimDueDelivery(workerId, leaseMs) {
+      const res = await pool.query(
+        `WITH candidate AS (
+           SELECT id FROM deliveries
+           WHERE status IN ('pending','retry_scheduled')
+             AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+             AND (locked_until IS NULL OR locked_until < now())
+           ORDER BY next_attempt_at ASC NULLS FIRST, created_at ASC
+           FOR UPDATE SKIP LOCKED
+           LIMIT 1
+         )
+         UPDATE deliveries d
+         SET status = 'processing', locked_by = $1, locked_until = now() + ($2::int * interval '1 millisecond'), updated_at = now()
+         FROM candidate c
+         WHERE d.id = c.id
+         RETURNING d.*`,
+        [workerId, leaseMs]
+      );
+      return res.rowCount ? mapDelivery(res.rows[0]) : null;
+    },
+
+    async recordAttempt(input) {
+      const { deliveryId, workerId, attempt, outcome } = input;
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const cur = await client.query('SELECT locked_by FROM deliveries WHERE id = $1 FOR UPDATE', [deliveryId]);
+        if (!cur.rowCount) {
+          await client.query('ROLLBACK');
+          return null;
+        }
+        if (cur.rows[0].locked_by && workerId && cur.rows[0].locked_by !== workerId) {
+          await client.query('ROLLBACK');
+          return { delivery: null, stale: true, dead: false };
+        }
+
+        await client.query(
+          'INSERT INTO delivery_attempts (id, delivery_id, attempt_number, started_at, finished_at, status_code, duration_ms, error_class, response_excerpt, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (delivery_id, attempt_number) DO NOTHING',
+          [genId('att'), deliveryId, attempt.attemptNumber, attempt.startedAt, attempt.finishedAt, attempt.statusCode, attempt.durationMs, attempt.errorClass, attempt.responseExcerpt, nowIso()]
+        );
+
+        let status = 'dead_lettered';
+        let nextAttemptAt = null;
+        if (outcome.type === 'succeeded') status = 'succeeded';
+        else if (outcome.type === 'retry') {
+          status = 'retry_scheduled';
+          nextAttemptAt = new Date(Date.now() + (outcome.delayMs || 0)).toISOString();
+        }
+
+        const res = await client.query(
+          'UPDATE deliveries SET status = $2, attempt_count = $3, next_attempt_at = $4, locked_by = NULL, locked_until = NULL, last_status_code = $5, last_error = $6, updated_at = now() WHERE id = $1 RETURNING *',
+          [deliveryId, status, attempt.attemptNumber, nextAttemptAt, outcome.statusCode || null, outcome.error || null]
+        );
+        await client.query('COMMIT');
+        return { delivery: mapDelivery(res.rows[0]), dead: outcome.type === 'dead', stale: false };
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+
+    async queueMetrics() {
+      const depth = await pool.query(
+        `SELECT count(*)::int AS n FROM deliveries
+         WHERE status IN ('pending','retry_scheduled')
+           AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+           AND (locked_until IS NULL OR locked_until < now())`
+      );
+      const age = await pool.query(
+        `SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) AS age FROM deliveries WHERE status = 'pending'`
+      );
+      const seconds = age.rows[0].age == null ? 0 : Number(age.rows[0].age);
+      return { queueDepth: depth.rows[0].n, oldestPendingAgeSeconds: seconds };
+    },
+
+    async getEndpointSigningSecret(endpointId) {
+      const res = await pool.query('SELECT signing_secret FROM endpoints WHERE id = $1', [endpointId]);
+      return res.rowCount ? res.rows[0].signing_secret : null;
+    },
+
+    // ---- audit ---------------------------------------------------------
+    async appendAudit(record) {
+      const row = Object.assign({ id: genId('aud'), createdAt: nowIso() }, record);
+      await pool.query(
+        'INSERT INTO audit_log (id, organization_id, actor_key_id, action, resource_type, resource_id, metadata, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [row.id, row.organizationId || null, row.actorKeyId || null, row.action, row.resourceType || null, row.resourceId || null, row.metadata ? JSON.stringify(row.metadata) : null, row.createdAt]
+      );
+      return row;
+    },
+
+    async listAudit(filter) {
+      const f = filter || {};
+      const limit = Math.min(Math.max(1, parseInt(f.limit, 10) || 50), 200);
+      const res = await pool.query(
+        'SELECT * FROM audit_log WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2',
+        [f.organizationId, limit]
+      );
+      const data = res.rows.map((row) => ({
+        id: row.id,
+        organizationId: row.organization_id,
+        actorKeyId: row.actor_key_id,
+        action: row.action,
+        resourceType: row.resource_type,
+        resourceId: row.resource_id,
+        metadata: row.metadata,
+        createdAt: iso(row.created_at),
+      }));
+      return { data, next_cursor: null, total: data.length };
+    },
+  };
+}
+
+module.exports = { createStore };
