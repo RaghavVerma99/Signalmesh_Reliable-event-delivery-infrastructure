@@ -5,8 +5,19 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "start:api": "node src/api.js",
+    "start:worker": "node src/worker-main.js",
+    "migrate": "node scripts/migrate.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test tests/"
+    "test": "node --test tests/",
+    "seed": "node scripts/seed.js",
+    "demo:reset": "node scripts/seed.js --reset",
+    "demo:seed": "node scripts/seed.js",
+    "demo:server": "node scripts/demo-server.js",
+    "demo:run": "node scripts/demo.js",
+    "smoke": "node scripts/smoke.js",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down -v"
   },
   "dependencies": {
     "express": "^4.21.2",
