@@ -31,8 +31,8 @@ for (const bucket of DURATION_BUCKETS) {
 const durationSum = { value: 0 };
 const durationCount = { value: 0 };
 
-function inc(key) {
-  counters[key] = (counters[key] || 0) + 1;
+function inc(key, n) {
+  counters[key] = (counters[key] || 0) + (n === undefined ? 1 : n);
 }
 
 function setGauge(key, value) {
