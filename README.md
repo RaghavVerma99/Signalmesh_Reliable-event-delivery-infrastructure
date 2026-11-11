@@ -54,6 +54,17 @@ docker compose up --build                    # all-in-one, JSON store
 docker compose --profile split up --build    # API + worker + PostgreSQL
 ```
 
+## Deploying
+
+- **Vercel (API only) + worker on Railway/Fly/Render:** see [`docs/VERCEL.md`](./docs/VERCEL.md). Vercel cannot run the long-lived worker, so the API and worker must be deployed separately.
+- **Single platform (recommended for a delivery engine):** use the Docker image with `SIGNALMESH_ROLE=all`, or two services (`api` + `worker`) sharing PostgreSQL.
+
+Vercel quick check:
+
+```bash
+npm run vercel:check   # validates api/index.js locally
+```
+
 ## Configuration
 
 Copy `.env.example` to `.env` and adjust. Key variables:

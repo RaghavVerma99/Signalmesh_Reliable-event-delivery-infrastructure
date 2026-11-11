@@ -1,0 +1,8 @@
+data
+tests
+docs
+.github
+*.log
+.env
+.env.example
+scripts

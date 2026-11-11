@@ -47,6 +47,7 @@ module.exports = {
     burst: Math.max(1, int('SIGNALMESH_RATE_LIMIT_BURST', 120)),
   },
   idempotencyTtlMs: Math.max(0, int('SIGNALMESH_IDEMPOTENCY_TTL_MS', 24 * 60 * 60 * 1000)),
+  internalToken: process.env.SIGNALMESH_INTERNAL_TOKEN || null,
   dashboardEnabled: bool('SIGNALMESH_ENABLE_DASHBOARD', !isProduction),
   log: {
     level: process.env.SIGNALMESH_LOG_LEVEL || 'info',

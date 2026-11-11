@@ -84,6 +84,8 @@ function createStore(config) {
     kind: 'postgres',
 
     async init() {
+      // On serverless platforms, run `npm run migrate` during deploy instead.
+      if (process.env.SIGNALMESH_SKIP_MIGRATIONS === 'true') return;
       await runMigrations(pool, log);
     },
 

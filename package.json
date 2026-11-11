@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "SignalMesh webhook delivery MVP - working demo of durable event fan-out, retries and dead-lettering",
   "main": "src/server.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/server.js",
     "start:api": "node src/api.js",
@@ -10,6 +13,7 @@
     "migrate": "node scripts/migrate.js",
     "dev": "node --watch src/server.js",
     "test": "node --test tests/",
+    "vercel:check": "node scripts/vercel-check.js",
     "seed": "node scripts/seed.js",
     "demo:reset": "node scripts/seed.js --reset",
     "demo:seed": "node scripts/seed.js",
