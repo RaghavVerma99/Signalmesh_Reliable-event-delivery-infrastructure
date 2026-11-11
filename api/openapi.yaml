@@ -1,0 +1,472 @@
+openapi: 3.0.3
+info:
+  title: SignalMesh API
+  version: 0.1.0
+  description: |
+    Tenant-scoped webhook event delivery API. All `/v1` endpoints require a
+    bearer API key except the first bootstrap `POST /v1/keys`. Delivery is
+    at-least-once; consumers must deduplicate using `event_id`.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+tags:
+  - name: keys
+  - name: events
+  - name: endpoints
+  - name: deliveries
+  - name: audit
+  - name: health
+
+paths:
+  /v1/keys:
+    post:
+      tags: [keys]
+      summary: Create an API key (bootstrap when no keys exist)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                organization: { type: string, description: Only used during bootstrap }
+      responses:
+        '201':
+          description: Created (secret shown once)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                      key: { type: string }
+                      prefix: { type: string }
+                  organization_id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      tags: [keys]
+      summary: List keys in the caller's organization
+      responses:
+        '200':
+          description: Keys (hashes never returned)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { type: object } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/keys/{id}/revoke:
+    post:
+      tags: [keys]
+      summary: Revoke a key in the caller's organization
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200': { description: Revoked }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/events:
+    post:
+      tags: [events]
+      summary: Ingest an event (fan-out to matching endpoints)
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_type]
+              properties:
+                event_type: { type: string }
+                data: { type: object }
+                occurred_at: { type: string, format: date-time }
+                metadata: { type: object }
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event_id: { type: string }
+                  status: { type: string, enum: [accepted] }
+                  created_at: { type: string, format: date-time }
+                  deliveries_created: { type: integer }
+        '200':
+          description: Duplicate idempotent request (original result)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event_id: { type: string }
+                  idempotent: { type: boolean }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Validation' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [events]
+      summary: List events
+      parameters:
+        - name: event_type
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Page of events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Event' } }
+                  next_cursor: { type: string, nullable: true }
+                  total: { type: integer }
+
+  /v1/endpoints:
+    post:
+      tags: [endpoints]
+      summary: Register an endpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                name: { type: string }
+                url: { type: string, format: uri }
+                event_types: { type: array, items: { type: string } }
+                active: { type: boolean }
+                timeout_seconds: { type: number }
+                max_attempts: { type: integer }
+      responses:
+        '201':
+          description: Created (signing secret shown once)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoint: { $ref: '#/components/schemas/Endpoint' }
+                  signing_secret: { type: string }
+        '422': { $ref: '#/components/responses/Validation' }
+    get:
+      tags: [endpoints]
+      summary: List endpoints
+      responses:
+        '200':
+          description: Endpoints in the caller's organization
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Endpoint' } }
+                  total: { type: integer }
+
+  /v1/endpoints/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [endpoints]
+      summary: Get an endpoint
+      responses:
+        '200':
+          description: Endpoint
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoint: { $ref: '#/components/schemas/Endpoint' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [endpoints]
+      summary: Update an endpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                url: { type: string, format: uri }
+                event_types: { type: array, items: { type: string } }
+                active: { type: boolean }
+                timeout_seconds: { type: number }
+                max_attempts: { type: integer }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoint: { $ref: '#/components/schemas/Endpoint' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [endpoints]
+      summary: Soft-delete an endpoint
+      responses:
+        '200': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/endpoints/{id}/rotate-secret:
+    post:
+      tags: [endpoints]
+      summary: Rotate the signing secret (previous remains valid for overlap)
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: New signing secret (shown once)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoint: { $ref: '#/components/schemas/Endpoint' }
+                  signing_secret: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/deliveries:
+    get:
+      tags: [deliveries]
+      summary: List deliveries
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: event_id
+          in: query
+          schema: { type: string }
+        - name: endpoint_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Page of deliveries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Delivery' } }
+                  next_cursor: { type: string, nullable: true }
+                  total: { type: integer }
+
+  /v1/deliveries/{id}:
+    get:
+      tags: [deliveries]
+      summary: Get a delivery with event and endpoint
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200': { description: Delivery detail }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/deliveries/{id}/replay:
+    post:
+      tags: [deliveries]
+      summary: Replay a delivery (creates a new linked delivery)
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '202': { description: Replay scheduled }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/deliveries/{id}/cancel:
+    post:
+      tags: [deliveries]
+      summary: Cancel a pending delivery
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200': { description: Cancelled or already terminal }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/audit:
+    get:
+      tags: [audit]
+      summary: List audit records for the caller's organization
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Audit page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AuditRecord' } }
+                  total: { type: integer }
+
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness
+      security: []
+      responses:
+        '200': { description: Alive }
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness (checks storage)
+      security: []
+      responses:
+        '200': { description: Ready }
+        '503': { description: Storage unavailable }
+  /metrics:
+    get:
+      tags: [health]
+      summary: Prometheus metrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus text exposition
+          content:
+            text/plain:
+              schema: { type: string }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Not found within the caller's tenant
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: State or idempotency conflict
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Validation:
+      description: Semantic validation failure
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: Tenant rate limit exceeded
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
+    Event:
+      type: object
+      properties:
+        event_id: { type: string }
+        event_type: { type: string }
+        data: { type: object }
+        occurred_at: { type: string, format: date-time, nullable: true }
+        metadata: { type: object }
+        created_at: { type: string, format: date-time }
+        delivery_count: { type: integer }
+    Endpoint:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        url: { type: string, format: uri }
+        event_types: { type: array, items: { type: string } }
+        active: { type: boolean }
+        timeout_seconds: { type: number }
+        max_attempts: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Delivery:
+      type: object
+      properties:
+        id: { type: string }
+        event_id: { type: string }
+        event_type: { type: string }
+        endpoint_id: { type: string }
+        status:
+          type: string
+          enum: [pending, processing, retry_scheduled, succeeded, dead_lettered, cancelled]
+        attempt_count: { type: integer }
+        next_attempt_at: { type: string, format: date-time, nullable: true }
+        last_status_code: { type: integer, nullable: true }
+        last_error: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AuditRecord:
+      type: object
+      properties:
+        id: { type: string }
+        action: { type: string }
+        resourceType: { type: string }
+        resourceId: { type: string }
+        metadata: { type: object, nullable: true }
+        createdAt: { type: string, format: date-time }

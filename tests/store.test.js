@@ -150,3 +150,22 @@ test('audit log is tenant scoped', async () => {
     try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
   }
 });
+
+test('rotateEndpointSecret preserves the previous secret and is tenant scoped', async () => {
+  const { store, dataFile } = tempStore();
+  try {
+    await store.init();
+    const a = await store.createOrganization('a');
+    const b = await store.createOrganization('b');
+    await store.insertEndpoint(endpoint(a.id, 'ep_rotate'));
+
+    const rotated = await store.rotateEndpointSecret('ep_rotate', a.id, 'enc:new-secret');
+    assert.equal(rotated.signingSecret, 'enc:new-secret');
+    assert.equal(rotated.signingSecretPrevious, 'plain:whsec_x');
+
+    const crossTenant = await store.rotateEndpointSecret('ep_rotate', b.id, 'enc:hijack');
+    assert.equal(crossTenant, null);
+  } finally {
+    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+  }
+});

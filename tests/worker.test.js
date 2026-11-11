@@ -13,14 +13,14 @@ function tempStore() {
   return { store: createJsonStore({ dataFile }), dataFile };
 }
 
-async function seedDelivery(store) {
+async function seedDelivery(store, url) {
   const now = new Date().toISOString();
   const org = await store.createOrganization('test');
   const ep = await store.insertEndpoint({
     id: 'ep_test',
     organizationId: org.id,
     name: 'test',
-    url: 'http://127.0.0.1:9/never',
+    url: url || 'http://127.0.0.1:9/never',
     eventTypes: ['x'],
     active: true,
     signingSecret: 'plain:whsec_test',
@@ -128,6 +128,20 @@ test('a stale worker cannot overwrite a newer claim', async () => {
     assert.equal(stale.stale, true);
     const current = await store.getDelivery('dlv_test', null);
     assert.equal(current.delivery.status, 'processing');
+  } finally {
+    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+  }
+});
+
+test('worker dead-letters a destination that fails the SSRF check', async () => {
+  const { store, dataFile } = tempStore();
+  try {
+    await store.init();
+    const seeded = await seedDelivery(store, 'http://10.0.0.5/hook');
+    const worker = createWorker(store, { workerId: 'w-ssrf' });
+    const result = await worker.runAttempt(seeded.delivery);
+    assert.equal(result.delivery.status, 'dead_lettered');
+    assert.equal(result.delivery.lastError, 'destination_blocked');
   } finally {
     try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
   }

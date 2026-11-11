@@ -55,6 +55,42 @@ function isLoopbackIp(ip) {
   return first === 127;
 }
 
+/**
+ * Address policy shared by registration-time and connection-time checks.
+ * Loopback is permitted only outside production (local demos/tests).
+ */
+function isAllowedAddress(ip) {
+  const loopback = isLoopbackIp(ip);
+  const blocked = isBlockedIp(ip);
+  return !blocked || (loopback && !IS_PRODUCTION);
+}
+
+/**
+ * Custom DNS lookup for outbound HTTP clients. Validates the address that
+ * is actually used for the connection, closing the DNS-rebinding window
+ * between a pre-flight resolve and the real connect.
+ */
+function createSafeLookup() {
+  return function safeLookup(hostname, options, callback) {
+    const opts = typeof options === 'function' ? {} : (options || {});
+    const cb = typeof options === 'function' ? options : callback;
+    const lookupOpts = { all: true };
+    if (opts.family === 4 || opts.family === 6) lookupOpts.family = opts.family;
+
+    dns.lookup(hostname, lookupOpts, (err, addresses) => {
+      if (err) return cb(err);
+      const list = Array.isArray(addresses) ? addresses : [addresses];
+      const allowed = list.filter((entry) => isAllowedAddress(entry.address));
+      if (!allowed.length) {
+        const blocked = new Error('blocked_address');
+        blocked.code = 'blocked_address';
+        return cb(blocked);
+      }
+      return cb(null, allowed[0].address, allowed[0].family);
+    });
+  };
+}
+
 async function resolveHostname(hostname) {
   const candidate = String(hostname || '').trim().toLowerCase();
   const isIpLiteral = candidate.includes(':') || /^(\d{1,3}\.){3}\d{1,3}$/.test(candidate);
@@ -210,6 +246,8 @@ module.exports = {
   isLoopbackIp,
   validateDeliveryUrl,
   recheckDeliveryDestination,
+  isAllowedAddress,
+  createSafeLookup,
   hashApiKey,
   encryptSecret,
   decryptSecret,

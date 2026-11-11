@@ -118,4 +118,12 @@ Tenant isolation, PostgreSQL, rate limiting, audit logging, process split, tests
 - **Tests**: 18 unit/integration tests + conditional PostgreSQL integration test; `tests/api.test.js`, `tests/store.test.js`, `tests/ratelimit.test.js`.
 - **CI**: `.github/workflows/ci.yml` (Node 22/24, PostgreSQL service, Docker build).
 
-Remaining for full spec parity: connected-IP SSRF validation, OpenTelemetry, outbox table usage, secret-rotation overlap, and load/failure-injection benchmarks.
+Hardening pass (same day):
+
+- **Connected-IP SSRF validation**: `createSafeLookup()` validates the address used for the connection; the worker now uses Node `http`/`https` with a validating `lookup` (and never follows redirects).
+- **Secret rotation overlap**: `POST /v1/endpoints/:id/rotate-secret`; previous secret retained and delivered as `x-signalmesh-signature-previous`.
+- **Worker heartbeat**: `worker_last_tick_timestamp_seconds` gauge in `/metrics`.
+- **OpenAPI**: `api/openapi.yaml`.
+- **Tests**: 22 passing (connection-time SSRF, rotation, blocked-destination).
+
+Remaining for full spec parity: outbox-table usage (deliveries are currently written transactionally in the same ingest transaction), OpenTelemetry, shared multi-replica rate limiting, load/failure-injection benchmarks, and SDK/CLI.

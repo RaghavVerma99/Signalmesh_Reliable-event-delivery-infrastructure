@@ -174,7 +174,7 @@ Multiple worker replicas are safe with the PostgreSQL store. If you scale the AP
 - [ ] Scrape `/metrics` (Prometheus) and alert on: oldest pending age, dead-letter rate, worker_active_count stuck at 0 while queue > 0.
 - [ ] Ship stdout JSON logs to your log platform; ensure `request_id`, `organization_id`, `event_id`, `delivery_id` are indexed.
 - [x] `/readyz` checks storage reachability (ping) before routing traffic.
-- [ ] Add a worker heartbeat metric (currently only `worker_active_count`).
+- [x] Worker heartbeat metric: `worker_last_tick_timestamp_seconds`.
 
 ### B.6 CI/CD
 
@@ -187,7 +187,7 @@ Multiple worker replicas are safe with the PostgreSQL store. If you scale the AP
 
 - [ ] TLS everywhere; HSTS at the proxy.
 - [ ] Secrets in a vault, not env files committed to disk.
-- [ ] SSRF: keep delivery-time re-check; add connected-IP validation before connecting.
+- [ ] SSRF: delivery-time re-check + connection-time validating lookup are in place; keep outbound egress controls too.
 - [ ] Disable redirects (already `manual`).
 - [ ] Restrict outbound egress at the network layer.
 - [ ] Add request/response size limits at the proxy too.

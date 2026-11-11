@@ -8,7 +8,7 @@ Full design: [`SIGNALMESH_SPEC.md`](./SIGNALMESH_SPEC.md)
 - Tenant isolation: every API key belongs to an organization; all reads/writes are scoped to it.
 - API key auth: `POST /v1/keys` (bootstrap) + `Authorization: Bearer <key>` for `/v1/*`; key revoke/list.
 - Event ingestion: `POST /v1/events` -> `202 Accepted`, optional `Idempotency-Key` (TTL + fingerprint conflict detection).
-- Endpoint CRUD: `POST/GET/PATCH/DELETE /v1/endpoints` (url, event_types, timeout_seconds, max_attempts).
+- Endpoint CRUD: `POST/GET/PATCH/DELETE /v1/endpoints` (url, event_types, timeout_seconds, max_attempts) + `POST /v1/endpoints/:id/rotate-secret`.
 - Fan-out: event -> one delivery per matching active endpoint.
 - Worker: concurrent claims, signed HTTP POST, bounded timeout, exponential backoff + jitter, retries on network/timeout/408/429/5xx, dead-letters on exhaustion.
 - Delivery states: `pending`, `processing`, `retry_scheduled`, `succeeded`, `dead_lettered`, `cancelled`.
@@ -18,6 +18,7 @@ Full design: [`SIGNALMESH_SPEC.md`](./SIGNALMESH_SPEC.md)
 - Storage: JSON file (dev) or PostgreSQL (durable, atomic ingest, `FOR UPDATE SKIP LOCKED` claiming).
 - Split processes: `src/api.js` and `src/worker-main.js` share PostgreSQL.
 - Health: `GET /healthz`, `GET /readyz` (storage check), `GET /metrics`.
+- OpenAPI contract: [`api/openapi.yaml`](./api/openapi.yaml).
 - Mock receivers: `POST /demo/orders` (verifies HMAC signature), `POST /demo/orders-flaky` (fails once), `POST /demo/orders-down` (always fails).
 
 ## Run

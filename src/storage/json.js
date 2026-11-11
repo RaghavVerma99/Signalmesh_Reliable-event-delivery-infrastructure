@@ -250,6 +250,16 @@ function createStore(options) {
       return ep;
     },
 
+    async rotateEndpointSecret(id, organizationId, newCiphertext) {
+      const ep = state.endpoints.find((e) => e.id === id && e.organizationId === organizationId && !e.deletedAt);
+      if (!ep) return null;
+      ep.signingSecretPrevious = ep.signingSecret;
+      ep.signingSecret = newCiphertext;
+      ep.updatedAt = nowIso();
+      flush();
+      return ep;
+    },
+
     async softDeleteEndpoint(id, organizationId) {
       const ep = state.endpoints.find((e) => e.id === id && e.organizationId === organizationId && !e.deletedAt);
       if (!ep) return null;

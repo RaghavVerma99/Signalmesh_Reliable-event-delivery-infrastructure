@@ -96,6 +96,14 @@ test('tenant-scoped API flow', async () => {
   const crossPatch = await req('PATCH', '/v1/endpoints/' + ep.body.endpoint.id, { key: keyB, body: { name: 'hijack' } });
   assert.equal(crossPatch.status, 404);
 
+  // Secret rotation returns the new secret once and is tenant scoped.
+  const rotate = await req('POST', '/v1/endpoints/' + ep.body.endpoint.id + '/rotate-secret', { key: keyA });
+  assert.equal(rotate.status, 200);
+  assert.ok(rotate.body.signing_secret.startsWith('whsec_'));
+  assert.notEqual(rotate.body.signing_secret, ep.body.signing_secret);
+  const crossRotate = await req('POST', '/v1/endpoints/' + ep.body.endpoint.id + '/rotate-secret', { key: keyB });
+  assert.equal(crossRotate.status, 404);
+
   // Deliveries are tenant scoped.
   assert.equal((await req('GET', '/v1/deliveries', { key: keyB })).body.total, 0);
   assert.equal((await req('GET', '/v1/deliveries', { key: keyA })).body.total, 1);

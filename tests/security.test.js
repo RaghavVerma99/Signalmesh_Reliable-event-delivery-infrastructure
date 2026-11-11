@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { signDelivery, verifyDeliverySignature, validateDeliveryUrl, isBlockedIp, recheckDeliveryDestination, encryptSecret, decryptSecret, hashApiKey } = require('../src/security');
+const { signDelivery, verifyDeliverySignature, validateDeliveryUrl, isBlockedIp, recheckDeliveryDestination, encryptSecret, decryptSecret, hashApiKey, isAllowedAddress, createSafeLookup } = require('../src/security');
 
 test('hmac sign and verify roundtrip', () => {
   const secret = 'whsec_test_secret';
@@ -65,4 +65,25 @@ test('recheckDeliveryDestination blocks private addresses but allows loopback in
   assert.equal(privateRes.error, 'blocked_address');
   const loopbackRes = await recheckDeliveryDestination('http://127.0.0.1:8080/demo/orders');
   assert.equal(loopbackRes.ok, true);
+});
+
+test('isAllowedAddress permits loopback in dev but blocks private ranges', () => {
+  assert.equal(isAllowedAddress('127.0.0.1'), true);
+  assert.equal(isAllowedAddress('10.0.0.5'), false);
+  assert.equal(isAllowedAddress('169.254.169.254'), false);
+  assert.equal(isAllowedAddress('8.8.8.8'), true);
+});
+
+test('createSafeLookup rejects blocked addresses at connection time', async () => {
+  const lookup = createSafeLookup();
+  const address = await new Promise((resolve, reject) => {
+    lookup('127.0.0.1', {}, (err, resolved) => (err ? reject(err) : resolve(resolved)));
+  });
+  assert.equal(address, '127.0.0.1');
+
+  const blocked = await new Promise((resolve) => {
+    lookup('10.0.0.5', {}, (err) => resolve(err));
+  });
+  assert.ok(blocked);
+  assert.equal(blocked.code, 'blocked_address');
 });

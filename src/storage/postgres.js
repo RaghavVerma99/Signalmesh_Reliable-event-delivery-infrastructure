@@ -30,6 +30,7 @@ function mapEndpoint(row) {
     eventTypes: row.event_types || ['*'],
     active: row.active,
     signingSecret: row.signing_secret,
+    signingSecretPrevious: row.signing_secret_previous || null,
     timeoutMs: row.timeout_ms,
     maxAttempts: row.max_attempts,
     baseDelayMs: row.base_delay_ms,
@@ -328,6 +329,14 @@ function createStore(config) {
       const res = await pool.query(
         'UPDATE endpoints SET ' + sets.join(', ') + ' WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL RETURNING *',
         params
+      );
+      return res.rowCount ? mapEndpoint(res.rows[0]) : null;
+    },
+
+    async rotateEndpointSecret(id, organizationId, newCiphertext) {
+      const res = await pool.query(
+        'UPDATE endpoints SET signing_secret_previous = signing_secret, signing_secret = $3, updated_at = now() WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL RETURNING *',
+        [id, organizationId, newCiphertext]
       );
       return res.rowCount ? mapEndpoint(res.rows[0]) : null;
     },

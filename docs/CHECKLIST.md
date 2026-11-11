@@ -34,7 +34,7 @@ Companion to SIGNALMESH_SPEC.md. Audits the current MVP implementation and track
 - [x] Exhausted deliveries become dead-lettered.
 - [x] Operators can inspect attempts and replay failed deliveries.
 - [x] Tenant isolation is covered by automated tests.
-- [ ] SSRF protections are implemented and tested (delivery-time re-check done; connected-IP validation + dedicated tests pending).
+- [x] SSRF protections are implemented and tested (delivery-time re-check + connection-time validating DNS lookup).
 - [x] Health, readiness, logs, and metrics are available.
 - [x] Docker Compose starts a working local environment.
 - [x] Integration and end-to-end tests pass.
@@ -186,4 +186,12 @@ Phase 1 previously-implemented items now extended in Section 10 (tenant scoping,
 - [x] **PATCH endpoint + cursor pagination** - `PATCH /v1/endpoints/:id`; `cursor` on events/deliveries.
 - [x] **Tests + CI** - 18 passing unit/integration tests + conditional PostgreSQL integration; `.github/workflows/ci.yml` (Node 22/24, PostgreSQL service, Docker build).
 
-Outstanding from the spec: connected-IP SSRF validation, outbox-table usage, OpenTelemetry, secret rotation, load/failure-injection benchmarks, OpenAPI/SDK/CLI.
+Hardening pass (same day):
+
+- [x] **Connected-IP SSRF validation** - `createSafeLookup` validates the address actually used for the connection; worker uses Node `http`/`https` with that lookup (no redirects).
+- [x] **Secret rotation overlap** - `POST /v1/endpoints/:id/rotate-secret`; previous secret retained; deliveries carry `x-signalmesh-signature-previous`.
+- [x] **Worker heartbeat** - `worker_last_tick_timestamp_seconds` gauge.
+- [x] **OpenAPI contract** - `api/openapi.yaml`.
+- [x] **Tests** - 22 passing (added connection-time SSRF, rotation, blocked-destination cases).
+
+Outstanding from the spec: outbox-table usage (deliveries are written transactionally), OpenTelemetry, shared multi-replica rate limiter, load/failure-injection benchmarks, SDK/CLI.

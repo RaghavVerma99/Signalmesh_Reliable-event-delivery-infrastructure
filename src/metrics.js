@@ -10,7 +10,7 @@ const COUNTER_KEYS = [
   'delivery_dead_letter_total',
 ];
 
-const GAUGE_KEYS = ['queue_depth', 'oldest_pending_age_seconds', 'worker_active_count'];
+const GAUGE_KEYS = ['queue_depth', 'oldest_pending_age_seconds', 'worker_active_count', 'worker_last_tick_timestamp_seconds'];
 
 const DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 

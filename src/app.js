@@ -383,6 +383,20 @@ function createApp(deps) {
     return res.json({ endpoint: publicEndpoint(updated) });
   }));
 
+  app.post('/v1/endpoints/:id/rotate-secret', asyncHandler(async (req, res) => {
+    const existing = await store.getEndpoint(req.params.id, req.organizationId);
+    if (!existing) return res.status(404).json(errorBody('not_found', 'Endpoint not found', req.id));
+    const newSecret = 'whsec_' + crypto.randomBytes(12).toString('hex');
+    const updated = await store.rotateEndpointSecret(req.params.id, req.organizationId, encryptSecret(newSecret));
+    if (!updated) return res.status(404).json(errorBody('not_found', 'Endpoint not found', req.id));
+    await audit(req, 'endpoint.secret_rotated', 'endpoint', updated.id, {});
+    return res.json({
+      endpoint: publicEndpoint(updated),
+      signing_secret: newSecret,
+      note: 'The previous secret remains valid for the overlap window; deliveries also carry x-signalmesh-signature-previous.',
+    });
+  }));
+
   app.delete('/v1/endpoints/:id', asyncHandler(async (req, res) => {
     const ep = await store.softDeleteEndpoint(req.params.id, req.organizationId);
     if (!ep) return res.status(404).json(errorBody('not_found', 'Endpoint not found', req.id));
@@ -465,10 +479,14 @@ function createApp(deps) {
   app.post('/demo/orders', asyncHandler(async (req, res) => {
     const deliveryId = req.headers['x-signalmesh-delivery-id'];
     const result = deliveryId ? await store.getDelivery(deliveryId, null) : null;
-    const rawSecret = result && result.endpoint ? result.endpoint.signingSecret : null;
-    const secret = rawSecret ? decryptSecret(rawSecret) : null;
+    const rawSecrets = result && result.endpoint
+      ? [result.endpoint.signingSecret, result.endpoint.signingSecretPrevious].filter(Boolean)
+      : [];
+    const secrets = rawSecrets.map((value) => decryptSecret(value));
     const sig = String(req.headers['x-signalmesh-signature'] || '');
-    const ok = !!secret && verifyDeliverySignature(secret, String(req.headers['x-signalmesh-timestamp'] || ''), sig, JSON.stringify(req.body));
+    const ts = String(req.headers['x-signalmesh-timestamp'] || '');
+    const body = JSON.stringify(req.body);
+    const ok = secrets.some((secret) => verifyDeliverySignature(secret, ts, sig, body));
     if (!ok) return res.status(401).json({ error: 'invalid_signature' });
     return res.json({ ok: true, received_at: new Date().toISOString() });
   }));

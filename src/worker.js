@@ -1,10 +1,12 @@
 'use strict';
 
 const os = require('os');
+const http = require('http');
+const https = require('https');
 const defaultStore = require('./store');
 const config = require('./config');
 const { nowIso } = require('./util');
-const { signDelivery, decryptSecret, recheckDeliveryDestination, MAX_RESPONSE_BYTES } = require('./security');
+const { signDelivery, decryptSecret, recheckDeliveryDestination, createSafeLookup, MAX_RESPONSE_BYTES } = require('./security');
 const metrics = require('./metrics');
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -25,6 +27,60 @@ function recordDeliveryOutcome(outcome, durationMs) {
   metrics.observeDuration(durationMs / 1000);
   if (outcome.type === 'succeeded') metrics.inc('delivery_success_total');
   if (outcome.type === 'dead') metrics.inc('delivery_dead_letter_total');
+}
+
+const safeLookup = createSafeLookup();
+
+/**
+ * POST the webhook body using Node's http/https client with a validating DNS
+ * lookup. The lookup checks the actual address used for the connection,
+ * defeating DNS rebinding; redirects are never followed.
+ */
+function httpPost(urlString, headers, body, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try {
+      url = new URL(urlString);
+    } catch (e) {
+      return reject(e);
+    }
+    const lib = url.protocol === 'https:' ? https : http;
+    const payload = Buffer.from(body, 'utf8');
+    const req = lib.request({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: Object.assign({}, headers, { 'content-length': payload.length }),
+      lookup: safeLookup,
+    }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (chunk) => {
+        if (size < MAX_RESPONSE_BYTES) {
+          const remaining = MAX_RESPONSE_BYTES - size;
+          chunks.push(chunk.length > remaining ? chunk.subarray(0, remaining) : chunk);
+        }
+        size += chunk.length;
+      });
+      res.on('end', () => resolve({
+        statusCode: res.statusCode,
+        headers: res.headers,
+        body: Buffer.concat(chunks).toString('utf8') || null,
+        truncated: size > MAX_RESPONSE_BYTES,
+      }));
+      res.on('error', reject);
+    });
+    req.setTimeout(timeoutMs, () => {
+      const err = new Error('request timeout');
+      err.code = 'ETIMEDOUT';
+      req.destroy(err);
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
 }
 
 function createWorker(store, options) {
@@ -84,52 +140,51 @@ function createWorker(store, options) {
           throw blocked;
         }
 
-        const res = await fetch(endpoint.url, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-signalmesh-event-id': delivery.eventId,
-            'x-signalmesh-delivery-id': delivery.id,
-            'x-signalmesh-timestamp': String(timestamp),
-            'x-signalmesh-signature': signature,
-          },
-          body,
-          signal: AbortSignal.timeout(endpoint.timeoutMs || DEFAULT_TIMEOUT_MS),
-          redirect: 'manual',
-        });
-        const text = await res.text();
-        const buf = Buffer.from(text, 'utf8');
-        const excerpt = buf.length > MAX_RESPONSE_BYTES ? buf.subarray(0, MAX_RESPONSE_BYTES).toString('utf8') : (text || null);
+        const signaturePrevious = endpoint.signingSecretPrevious
+          ? signDelivery(decryptSecret(endpoint.signingSecretPrevious), timestamp, body)
+          : null;
+        const outboundHeaders = {
+          'content-type': 'application/json',
+          'x-signalmesh-event-id': delivery.eventId,
+          'x-signalmesh-delivery-id': delivery.id,
+          'x-signalmesh-timestamp': String(timestamp),
+          'x-signalmesh-signature': signature,
+        };
+        if (signaturePrevious) outboundHeaders['x-signalmesh-signature-previous'] = signaturePrevious;
+
+        const res = await httpPost(endpoint.url, outboundHeaders, body, endpoint.timeoutMs || DEFAULT_TIMEOUT_MS);
+        const excerpt = res.body || null;
         attempt.finishedAt = new Date().toISOString();
         attempt.durationMs = Date.now() - startedAtMs;
-        attempt.statusCode = res.status;
+        attempt.statusCode = res.statusCode;
         attempt.responseExcerpt = excerpt;
 
-        if (res.status >= 200 && res.status < 300) {
-          outcome = { type: 'succeeded', statusCode: res.status, error: null, responseExcerpt: excerpt };
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          outcome = { type: 'succeeded', statusCode: res.statusCode, error: null, responseExcerpt: excerpt };
         } else {
-          const retryable = RETRYABLE_STATUS.has(res.status);
+          const retryable = RETRYABLE_STATUS.has(res.statusCode);
           let delayMs = null;
-          if (res.status === 429 || res.status === 503) {
-            const retryAfter = parseInt(res.headers.get('retry-after') || '0', 10);
+          if (res.statusCode === 429 || res.statusCode === 503) {
+            const retryAfter = parseInt(res.headers['retry-after'] || '0', 10);
             if (retryAfter > 0) delayMs = Math.min(retryAfter * 1000, maxDelayMs);
           }
           if (!retryable) {
-            outcome = { type: 'dead', error: 'http_' + res.status, statusCode: res.status, responseExcerpt: excerpt };
+            outcome = { type: 'dead', error: 'http_' + res.statusCode, statusCode: res.statusCode, responseExcerpt: excerpt };
           } else if (attemptNumber >= maxAttempts) {
-            outcome = { type: 'dead', error: 'retry_exhausted', statusCode: res.status, responseExcerpt: excerpt };
+            outcome = { type: 'dead', error: 'retry_exhausted', statusCode: res.statusCode, responseExcerpt: excerpt };
           } else {
-            outcome = { type: 'retry', error: 'http_' + res.status, statusCode: res.status, responseExcerpt: excerpt, delayMs: delayMs != null ? delayMs : computeBackoffMs(attemptNumber, baseDelayMs, maxDelayMs) };
+            outcome = { type: 'retry', error: 'http_' + res.statusCode, statusCode: res.statusCode, responseExcerpt: excerpt, delayMs: delayMs != null ? delayMs : computeBackoffMs(attemptNumber, baseDelayMs, maxDelayMs) };
           }
         }
       }
     } catch (err) {
       attempt.finishedAt = new Date().toISOString();
       attempt.durationMs = Date.now() - startedAtMs;
-      if (err && err.code === 'destination_blocked') {
+      if (err && (err.code === 'destination_blocked' || err.code === 'blocked_address')) {
         outcome = { type: 'dead', error: 'destination_blocked', statusCode: null, responseExcerpt: null };
       } else {
-        const errorClass = err && err.name === 'TimeoutError' ? 'timeout' : 'network';
+        const timedOut = !!(err && (err.code === 'ETIMEDOUT' || err.name === 'TimeoutError'));
+        const errorClass = timedOut ? 'timeout' : 'network';
         if (attemptNumber >= maxAttempts) {
           outcome = { type: 'dead', error: 'retry_exhausted', statusCode: null, responseExcerpt: null };
         } else {
@@ -149,6 +204,7 @@ function createWorker(store, options) {
     if (running || stopping) return;
     running = true;
     try {
+      metrics.setGauge('worker_last_tick_timestamp_seconds', Date.now() / 1000);
       const qm = await store.queueMetrics();
       metrics.setGauge('queue_depth', qm.queueDepth);
       metrics.setGauge('oldest_pending_age_seconds', qm.oldestPendingAgeSeconds);
