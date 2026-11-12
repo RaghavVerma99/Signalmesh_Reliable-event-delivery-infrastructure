@@ -4,7 +4,7 @@
  * In-process token-bucket rate limiter keyed by tenant.
  *
  * Single-instance only: for multi-replica deployments move this to Redis or
- * a PostgreSQL-backed counter (see docs/NODE_STRATEGY.md).
+ * a shared database-backed counter.
  */
 function createRateLimiter(options) {
   const capacity = Math.max(1, options.burst);

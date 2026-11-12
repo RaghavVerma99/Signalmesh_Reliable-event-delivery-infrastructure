@@ -17,17 +17,13 @@ function log(level, msg, fields) {
 async function start() {
   await store.init();
 
-  if (config.role !== 'worker') {
-    const app = createApp({ store, config, worker });
-    server = app.listen(config.port, config.host, () => {
-      log('info', 'server_started', { port: config.port, role: config.role, storage: store.kind });
-    });
-  }
+  const app = createApp({ store, config, worker });
+  server = app.listen(config.port, config.host, () => {
+    log('info', 'server_started', { port: config.port, storage: store.kind });
+  });
 
-  if (config.role !== 'api') {
-    worker.start();
-    log('info', 'worker_started', { role: config.role, worker_id: worker.workerId, concurrency: config.worker.concurrency });
-  }
+  worker.start();
+  log('info', 'worker_started', { worker_id: worker.workerId, concurrency: config.worker.concurrency });
 
   return { server, store, worker };
 }

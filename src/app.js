@@ -25,12 +25,6 @@ function errorBody(code, message, requestId) {
   return { error: { code, message, request_id: requestId } };
 }
 
-function safeEqual(a, b) {
-  const left = Buffer.from(String(a || ''));
-  const right = Buffer.from(String(b || ''));
-  return left.length === right.length && left.length > 0 && crypto.timingSafeEqual(left, right);
-}
-
 function publicEndpoint(ep) {
   if (!ep) return null;
   return {
@@ -709,26 +703,6 @@ function createApp(deps) {
       res.type('html').send(renderDashboard());
     });
   }
-
-  // Optional scheduler-driven worker tick, for platforms that cannot run a
-  // long-lived worker (e.g. Vercel + external cron). Disabled unless a token
-  // is configured.
-  app.all(
-    '/internal/worker-tick',
-    asyncHandler(async (req, res) => {
-      if (!config.internalToken) {
-        return res.status(404).json(errorBody('not_found', 'Route not found', req.id));
-      }
-      const header = req.headers.authorization || '';
-      const bearer = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
-      const provided = bearer || req.headers['x-signalmesh-internal-token'] || '';
-      if (!safeEqual(provided, config.internalToken)) {
-        return res.status(401).json(errorBody('unauthorized', 'Invalid internal token', req.id));
-      }
-      await worker.tick();
-      return res.json({ ok: true, worker_id: worker.workerId });
-    })
-  );
 
   app.use((req, res) => {
     res.status(404).json(errorBody('not_found', 'Route not found', req.id));

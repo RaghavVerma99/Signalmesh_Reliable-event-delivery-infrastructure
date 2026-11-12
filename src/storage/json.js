@@ -11,7 +11,7 @@ const { nowIso, genId, hashApiKey, encodeCursor, decodeCursor } = require('../ut
  * Implements the async store contract used by the API and worker. Writes
  * are flushed synchronously before methods return so that acknowledged
  * work survives a process crash (NFR-001). Suitable for local development
- * and demos; use the PostgreSQL store for real deployments.
+ * and demos. It rewrites the whole file on every mutation.
  */
 function createStore(options) {
   const opts = options || {};

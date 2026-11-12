@@ -1,9 +1,0 @@
-node_modules/
-coverage/
-data/
-package-lock.json
-*.log
-
-# Prose is not auto-formatted: reformatting the spec and the long-form docs
-# produces a large, meaningless diff for no benefit.
-*.md
