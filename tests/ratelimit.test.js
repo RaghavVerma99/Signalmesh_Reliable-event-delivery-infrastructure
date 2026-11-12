@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -32,7 +32,11 @@ before(async () => {
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
   await store.close();
-  try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+  try {
+    fs.unlinkSync(dataFile);
+  } catch {
+    /* ignore */
+  }
 });
 
 test('tenant rate limit returns 429 with Retry-After', async () => {

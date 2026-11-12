@@ -43,21 +43,23 @@ test('postgres store: durable ingest, tenant scoping, claim and attempt', { skip
     const deliveryId = 'dlv_pg_' + suffix;
     const result = await store.ingestEvent({
       event: { id: eventId, organizationId: org.id, eventType: 'x', data: {}, occurredAt: null, metadata: {}, createdAt: now, deliveries: [deliveryId] },
-      deliveries: [{
-        id: deliveryId,
-        organizationId: org.id,
-        eventId,
-        eventType: 'x',
-        endpointId: ep.id,
-        status: 'pending',
-        attemptCount: 0,
-        nextAttemptAt: new Date(Date.now() - 1000).toISOString(),
-        lastStatusCode: null,
-        lastError: null,
-        createdAt: now,
-        updatedAt: now,
-        attempts: [],
-      }],
+      deliveries: [
+        {
+          id: deliveryId,
+          organizationId: org.id,
+          eventId,
+          eventType: 'x',
+          endpointId: ep.id,
+          status: 'pending',
+          attemptCount: 0,
+          nextAttemptAt: new Date(Date.now() - 1000).toISOString(),
+          lastStatusCode: null,
+          lastError: null,
+          createdAt: now,
+          updatedAt: now,
+          attempts: [],
+        },
+      ],
       idempotency: { organizationId: org.id, operation: 'events', key: 'pg-key-' + suffix, requestHash: 'h', responseStatus: 202, responseBody: { event_id: eventId } },
     });
     assert.equal(result.status, 'created');
@@ -83,6 +85,68 @@ test('postgres store: durable ingest, tenant scoping, claim and attempt', { skip
       outcome: { type: 'succeeded', error: null, statusCode: 200 },
     });
     assert.equal(recorded.delivery.status, 'succeeded');
+
+    // Attempt history is readable through the store.
+    const attempts = await store.listAttempts(deliveryId, org.id);
+    assert.ok(Array.isArray(attempts));
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0].attempt_number, 1);
+    assert.equal(attempts[0].status_code, 200);
+
+    // Attempt history is tenant scoped.
+    const otherOrg = await store.createOrganization('pg-other-' + suffix);
+    assert.equal(await store.listAttempts(deliveryId, otherOrg.id), null);
+
+    // Aggregated delivery counts (used by GET /v1/events).
+    const counts = await store.countDeliveriesForEvents([eventId], org.id);
+    assert.equal(counts.get(eventId), 1);
+
+    // Lease renewal keeps a claimed delivery out of reach of other workers.
+    const renewed = await store.renewLease(deliveryId, 'pg-worker', 5000);
+    assert.equal(renewed, true);
+    assert.equal(await store.renewLease(deliveryId, 'someone-else', 5000), false);
+
+    // Keyset pagination over rows that share a created_at value.
+    const shared = new Date().toISOString();
+    const sharedIds = [];
+    for (let i = 0; i < 6; i++) {
+      const id = 'evt_pg_shared_' + suffix + '_' + i;
+      sharedIds.push(id);
+      await store.ingestEvent({
+        event: { id, organizationId: org.id, eventType: 'shared', data: {}, occurredAt: null, metadata: {}, createdAt: shared, deliveries: [] },
+        deliveries: [],
+        idempotency: null,
+      });
+    }
+    const seen = new Set();
+    let cursor = null;
+    for (let page = 0; page < 10; page++) {
+      const result = await store.listEvents({ organizationId: org.id, eventType: 'shared', limit: 2, cursor });
+      for (const row of result.data) {
+        assert.ok(!seen.has(row.id), 'row returned twice: ' + row.id);
+        seen.add(row.id);
+      }
+      cursor = result.next_cursor;
+      if (!cursor) break;
+    }
+    assert.equal(seen.size, 6, 'every shared-timestamp row must be reachable exactly once');
+
+    // Expired idempotency records are released and swept.
+    const expiredKey = 'pg-expired-' + suffix;
+    await store.ingestEvent({
+      event: { id: 'evt_pg_exp_' + suffix, organizationId: org.id, eventType: 'x', data: {}, occurredAt: null, metadata: {}, createdAt: now, deliveries: [] },
+      deliveries: [],
+      idempotency: { organizationId: org.id, operation: 'events', key: expiredKey, requestHash: 'h2', responseStatus: 202, responseBody: {}, expiresAt: new Date(Date.now() - 1000).toISOString() },
+    });
+    const reused = await store.ingestEvent({
+      event: { id: 'evt_pg_exp2_' + suffix, organizationId: org.id, eventType: 'x', data: {}, occurredAt: null, metadata: {}, createdAt: now, deliveries: [] },
+      deliveries: [],
+      idempotency: { organizationId: org.id, operation: 'events', key: expiredKey, requestHash: 'h3', responseStatus: 202, responseBody: {}, expiresAt: new Date(Date.now() - 1000).toISOString() },
+    });
+    assert.equal(reused.status, 'created', 'an expired idempotency key must be reusable');
+
+    const swept = await store.sweepExpired({});
+    assert.ok(swept.idempotencyRemoved >= 0);
   } finally {
     await store.close();
   }

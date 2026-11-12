@@ -33,6 +33,13 @@ paths:
               properties:
                 name: { type: string }
                 organization: { type: string, description: Only used during bootstrap }
+                scopes:
+                  type: array
+                  items: { type: string, enum: [admin, keys:read, keys:write, events:read, events:write, endpoints:read, endpoints:write, deliveries:read, deliveries:write, audit:read] }
+                  description: >
+                    Permissions granted to the new key. `admin` implies everything and a
+                    write scope implies the matching read scope. Defaults to `admin`.
+                    A key with no scopes can do nothing.
       responses:
         '201':
           description: Created (secret shown once)
@@ -48,8 +55,11 @@ paths:
                       name: { type: string }
                       key: { type: string }
                       prefix: { type: string }
+                      scopes: { type: array, items: { type: string } }
                   organization_id: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Validation' }
     get:
       tags: [keys]
       summary: List keys in the caller's organization
@@ -289,11 +299,33 @@ paths:
   /v1/deliveries/{id}:
     get:
       tags: [deliveries]
-      summary: Get a delivery with event and endpoint
+      summary: Get a delivery with event, endpoint and attempt history
       parameters:
         - $ref: '#/components/parameters/Id'
       responses:
         '200': { description: Delivery detail }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/deliveries/{id}/attempts:
+    get:
+      tags: [deliveries]
+      summary: Attempt history for a delivery
+      description: >
+        Every outbound attempt with its status code, duration, error class and a
+        truncated excerpt of the destination's response. This is how a customer
+        finds out why a webhook failed.
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Attempt history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Attempt' } }
+                  total: { type: integer }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /v1/deliveries/{id}/replay:
@@ -353,11 +385,48 @@ paths:
   /readyz:
     get:
       tags: [health]
-      summary: Readiness (checks storage)
+      summary: Readiness (checks storage; reports worker liveness)
+      description: >
+        Returns 200 when this process can accept and durably persist requests.
+        It deliberately does not fail when no worker is alive: events are
+        persisted before delivery, so removing the API from the load balancer
+        in that case would turn a partial outage into a total one. Alert on
+        `/healthz/workers` instead.
       security: []
       responses:
-        '200': { description: Ready }
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  service: { type: string }
+                  storage: { type: string }
+                  workers: { type: integer }
+                  worker_last_seen_at: { type: string, format: date-time, nullable: true }
         '503': { description: Storage unavailable }
+  /healthz/workers:
+    get:
+      tags: [health]
+      summary: Worker liveness
+      description: >
+        Returns 503 when no worker has reported a heartbeat recently, meaning
+        deliveries are not being processed even though events are still accepted.
+      security: []
+      responses:
+        '200':
+          description: At least one worker is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  workers: { type: integer }
+                  worker_last_seen_at: { type: string, format: date-time, nullable: true }
+        '503': { description: No live worker }
   /metrics:
     get:
       tags: [health]
@@ -386,6 +455,11 @@ components:
   responses:
     Unauthorized:
       description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: The API key is valid but lacks the scope required for this operation
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -470,3 +544,19 @@ components:
         resourceId: { type: string }
         metadata: { type: object, nullable: true }
         createdAt: { type: string, format: date-time }
+    Attempt:
+      type: object
+      properties:
+        attempt_number: { type: integer }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+        status_code: { type: integer, nullable: true }
+        duration_ms: { type: integer, nullable: true }
+        error_class:
+          type: string
+          nullable: true
+          description: 'timeout, network, destination_blocked, http_<status>, retry_exhausted, ...'
+        response_excerpt:
+          type: string
+          nullable: true
+          description: Truncated body returned by the destination (capped by SIGNALMESH_MAX_RESPONSE_BYTES)

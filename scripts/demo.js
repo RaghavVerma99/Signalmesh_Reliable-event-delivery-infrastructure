@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 /**
  * Drives the demo scenario against a running server:
@@ -33,13 +33,18 @@ async function api(method, p, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
-  let parsed = null;
-  try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = text; }
+  let parsed;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    parsed = text;
+  }
   return { status: res.status, body: parsed };
 }
 
 async function postEvent(eventType, data, idempotencyKey) {
-  const res = await api('POST', '/v1/events', { event_type: eventType, data: data });
+  const headers = idempotencyKey ? { 'idempotency-key': idempotencyKey } : undefined;
+  const res = await api('POST', '/v1/events', { event_type: eventType, data: data }, headers);
   if (res.status !== 202) {
     throw new Error('ingest ' + eventType + ' failed: ' + res.status + ' ' + JSON.stringify(res.body));
   }

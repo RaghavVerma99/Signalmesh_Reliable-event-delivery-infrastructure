@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -31,7 +31,11 @@ before(async () => {
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
   await store.close();
-  try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+  try {
+    fs.unlinkSync(dataFile);
+  } catch {
+    /* ignore */
+  }
 });
 
 async function req(method, p, options) {
@@ -44,8 +48,12 @@ async function req(method, p, options) {
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
   });
   const text = await res.text();
-  let body = null;
-  try { body = text ? JSON.parse(text) : null; } catch (e) { body = text; }
+  let body;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = text;
+  }
   return { status: res.status, body, headers: res.headers };
 }
 

@@ -38,7 +38,8 @@ function isBlockedIp(ip) {
   try {
     const family = String(ip).includes(':') ? 'ipv6' : 'ipv4';
     return blockList.check(ip, family);
-  } catch (e) {
+  } catch {
+    // An address we cannot parse is treated as unsafe.
     return true;
   }
 }
@@ -72,7 +73,7 @@ function isAllowedAddress(ip) {
  */
 function createSafeLookup() {
   return function safeLookup(hostname, options, callback) {
-    const opts = typeof options === 'function' ? {} : (options || {});
+    const opts = typeof options === 'function' ? {} : options || {};
     const cb = typeof options === 'function' ? options : callback;
     const lookupOpts = { all: true };
     if (opts.family === 4 || opts.family === 6) lookupOpts.family = opts.family;
@@ -92,9 +93,11 @@ function createSafeLookup() {
 }
 
 async function resolveHostname(hostname) {
-  const candidate = String(hostname || '').trim().toLowerCase();
+  const candidate = String(hostname || '')
+    .trim()
+    .toLowerCase();
   const isIpLiteral = candidate.includes(':') || /^(\d{1,3}\.){3}\d{1,3}$/.test(candidate);
-  let ips = [];
+  let ips;
   if (isIpLiteral) {
     ips = [candidate];
   } else if (candidate === 'localhost' || candidate.endsWith('.localhost')) {
@@ -103,7 +106,7 @@ async function resolveHostname(hostname) {
     try {
       const resolved = await dns.promises.resolve(hostname);
       ips = resolved || [];
-    } catch (e) {
+    } catch {
       return { ok: false, error: 'dns_resolution_failed' };
     }
   }
@@ -114,7 +117,7 @@ async function validateDeliveryUrl(rawUrl) {
   let parsed;
   try {
     parsed = new URL(rawUrl);
-  } catch (e) {
+  } catch {
     return { ok: false, error: 'invalid_url' };
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -123,7 +126,7 @@ async function validateDeliveryUrl(rawUrl) {
   if (IS_PRODUCTION && parsed.protocol !== 'https:') {
     return { ok: false, error: 'https_required' };
   }
-  const port = parsed.port ? parseInt(parsed.port, 10) : (parsed.protocol === 'https:' ? 443 : 80);
+  const port = parsed.port ? parseInt(parsed.port, 10) : parsed.protocol === 'https:' ? 443 : 80;
   if (!Number.isNaN(port) && BLOCKED_OUTBOUND_PORTS.has(port)) {
     return { ok: false, error: 'blocked_port' };
   }
@@ -157,13 +160,13 @@ async function recheckDeliveryDestination(rawUrl) {
   let parsed;
   try {
     parsed = new URL(rawUrl);
-  } catch (e) {
+  } catch {
     return { ok: false, error: 'invalid_url' };
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return { ok: false, error: 'invalid_protocol' };
   }
-  const port = parsed.port ? parseInt(parsed.port, 10) : (parsed.protocol === 'https:' ? 443 : 80);
+  const port = parsed.port ? parseInt(parsed.port, 10) : parsed.protocol === 'https:' ? 443 : 80;
   if (!Number.isNaN(port) && BLOCKED_OUTBOUND_PORTS.has(port)) {
     return { ok: false, error: 'blocked_port' };
   }
@@ -225,7 +228,10 @@ function decryptSecret(ciphertextB64) {
 }
 
 function signDelivery(secret, timestamp, body) {
-  const signature = crypto.createHmac('sha256', secret).update(timestamp + '.' + body).digest('hex');
+  const signature = crypto
+    .createHmac('sha256', secret)
+    .update(timestamp + '.' + body)
+    .digest('hex');
   return 'v1=' + signature;
 }
 

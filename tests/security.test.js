@@ -2,7 +2,18 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { signDelivery, verifyDeliverySignature, validateDeliveryUrl, isBlockedIp, recheckDeliveryDestination, encryptSecret, decryptSecret, hashApiKey, isAllowedAddress, createSafeLookup } = require('../src/security');
+const {
+  signDelivery,
+  verifyDeliverySignature,
+  validateDeliveryUrl,
+  isBlockedIp,
+  recheckDeliveryDestination,
+  encryptSecret,
+  decryptSecret,
+  hashApiKey,
+  isAllowedAddress,
+  createSafeLookup,
+} = require('../src/security');
 
 test('hmac sign and verify roundtrip', () => {
   const secret = 'whsec_test_secret';

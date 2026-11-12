@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 /**
  * Local smoke test for the Vercel serverless entrypoint (api/index.js).
@@ -31,8 +31,12 @@ async function json(base, method, p, body, headers) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
-  let parsed = null;
-  try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = text; }
+  let parsed;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    parsed = text;
+  }
   return { status: res.status, body: parsed };
 }
 
@@ -60,7 +64,11 @@ async function main() {
     console.log('VERCEL HANDLER OK');
   } finally {
     await new Promise((resolve) => server.close(resolve));
-    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
   }
 }
 

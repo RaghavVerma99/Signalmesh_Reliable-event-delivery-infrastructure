@@ -4,16 +4,15 @@
 //   SIGNALMESH_ROLE=worker node src/worker-main.js
 const store = require('./store');
 const worker = require('./worker');
+const { createLogger } = require('./logging');
 
-function log(level, msg, fields) {
-  console.log(JSON.stringify(Object.assign({ ts: new Date().toISOString(), level, msg }, fields || {})));
-}
+const logger = createLogger({ base: { component: 'worker' } });
 
 let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  log('info', 'shutdown_started', { signal, role: 'worker' });
+  logger.info('shutdown_started', { signal, role: 'worker' });
   worker.stop();
   await worker.drain().catch(() => {});
   await Promise.resolve(store.close()).catch(() => {});
@@ -23,12 +22,13 @@ async function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-store.init()
+store
+  .init()
   .then(() => {
     worker.start();
-    log('info', 'worker_started', { role: 'worker', worker_id: worker.workerId });
+    logger.info('worker_started', { role: 'worker', worker_id: worker.workerId });
   })
   .catch((err) => {
-    log('error', 'worker_startup_failed', { error: String(err && err.message ? err.message : err) });
+    logger.error('worker_startup_failed', { error: String(err && err.message ? err.message : err) });
     process.exit(1);
   });

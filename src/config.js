@@ -49,6 +49,22 @@ module.exports = {
   idempotencyTtlMs: Math.max(0, int('SIGNALMESH_IDEMPOTENCY_TTL_MS', 24 * 60 * 60 * 1000)),
   internalToken: process.env.SIGNALMESH_INTERNAL_TOKEN || null,
   dashboardEnabled: bool('SIGNALMESH_ENABLE_DASHBOARD', !isProduction),
+  delivery: {
+    // Upper bound for a per-endpoint timeout. Without a cap a tenant could
+    // set a timeout longer than the worker lease and cause duplicate
+    // deliveries (the lease would expire while the attempt was still in
+    // flight and a second worker would claim it).
+    maxTimeoutMs: Math.max(1000, int('SIGNALMESH_MAX_ENDPOINT_TIMEOUT_MS', 60000)),
+    maxAttempts: Math.max(1, int('SIGNALMESH_MAX_ENDPOINT_ATTEMPTS', 20)),
+    maxEventTypes: Math.max(1, int('SIGNALMESH_MAX_EVENT_TYPES', 100)),
+  },
+  retention: {
+    // Rows older than this are removed by the maintenance sweep.
+    eventDays: Math.max(0, int('SIGNALMESH_RETENTION_EVENT_DAYS', 30)),
+    deliveryDays: Math.max(0, int('SIGNALMESH_RETENTION_DELIVERY_DAYS', 30)),
+    auditDays: Math.max(0, int('SIGNALMESH_RETENTION_AUDIT_DAYS', 90)),
+    sweepIntervalMs: Math.max(60000, int('SIGNALMESH_SWEEP_INTERVAL_MS', 15 * 60 * 1000)),
+  },
   log: {
     level: process.env.SIGNALMESH_LOG_LEVEL || 'info',
   },

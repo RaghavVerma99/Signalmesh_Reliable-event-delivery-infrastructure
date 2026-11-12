@@ -8,3 +8,7 @@ data
 docs
 tests
 coverage
+.eslintcache
+eslint.config.js
+.prettierrc.json
+.prettierignore

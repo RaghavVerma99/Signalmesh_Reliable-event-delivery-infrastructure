@@ -1,7 +1,7 @@
 {
   "name": "signalmesh",
   "version": "0.1.0",
-  "description": "SignalMesh webhook delivery MVP - working demo of durable event fan-out, retries and dead-lettering",
+  "description": "SignalMesh - self-hostable webhook event delivery engine: durable event fan-out, signed deliveries, retries, dead-lettering and replay",
   "main": "src/server.js",
   "engines": {
     "node": ">=22"
@@ -13,6 +13,12 @@
     "migrate": "node scripts/migrate.js",
     "dev": "node --watch src/server.js",
     "test": "node --test tests/",
+    "test:coverage": "node --test --experimental-test-coverage tests/",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"**/*.{js,json,yaml,yml}\"",
+    "format:check": "prettier --check \"**/*.{js,json,yaml,yml}\"",
+    "check": "npm run lint && npm run format:check && npm test",
     "vercel:check": "node scripts/vercel-check.js",
     "seed": "node scripts/seed.js",
     "demo:reset": "node scripts/seed.js --reset",
@@ -26,5 +32,10 @@
   "dependencies": {
     "express": "^4.21.2",
     "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "prettier": "^3.10.0"
   }
 }

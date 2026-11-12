@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 /**
  * Vercel serverless entrypoint for the SignalMesh API.
@@ -21,12 +21,14 @@ function ensureReady() {
 module.exports = async function handler(req, res) {
   try {
     await ensureReady();
-  } catch (err) {
+  } catch {
     res.statusCode = 503;
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({
-      error: { code: 'storage_unavailable', message: 'Storage is not ready', request_id: null },
-    }));
+    res.end(
+      JSON.stringify({
+        error: { code: 'storage_unavailable', message: 'Storage is not ready', request_id: null },
+      })
+    );
     return;
   }
   return app(req, res);

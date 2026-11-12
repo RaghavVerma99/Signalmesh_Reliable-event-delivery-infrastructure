@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 /**
  * Seeds a local demo: one organization + API key + three endpoints that
@@ -18,8 +18,16 @@ const DATA_FILE = path.join(ROOT, 'data', 'db.json');
 const KEY_FILE = path.join(ROOT, 'data', '.demo-key');
 
 if (process.argv.includes('--reset')) {
-  try { fs.unlinkSync(DATA_FILE); } catch (e) { /* not present */ }
-  try { fs.unlinkSync(KEY_FILE); } catch (e) { /* not present */ }
+  try {
+    fs.unlinkSync(DATA_FILE);
+  } catch {
+    /* not present */
+  }
+  try {
+    fs.unlinkSync(KEY_FILE);
+  } catch {
+    /* not present */
+  }
 }
 
 // Require after the optional reset so the store loads a clean state.

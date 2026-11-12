@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 /**
  * End-to-end smoke test for the local demo flow.
@@ -15,10 +15,10 @@ async function json(method, path, body, headers) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
-  let parsed = null;
+  let parsed;
   try {
     parsed = text ? JSON.parse(text) : null;
-  } catch (e) {
+  } catch {
     parsed = text;
   }
   return { status: res.status, body: parsed };
@@ -34,11 +34,16 @@ async function main() {
   const apiKey = keyRes.body.key.key;
   const auth = { authorization: 'Bearer ' + apiKey };
 
-  const epRes = await json('POST', '/v1/endpoints', {
-    name: 'smoke-orders',
-    url: base + '/demo/orders',
-    event_types: ['order.created'],
-  }, auth);
+  const epRes = await json(
+    'POST',
+    '/v1/endpoints',
+    {
+      name: 'smoke-orders',
+      url: base + '/demo/orders',
+      event_types: ['order.created'],
+    },
+    auth
+  );
   assert(epRes.status === 201, 'endpoint creation should return 201, got ' + epRes.status);
   assert(typeof epRes.body.signing_secret === 'string' && epRes.body.signing_secret.startsWith('whsec_'), 'signing secret returned once');
   const endpointId = epRes.body.endpoint.id;

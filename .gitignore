@@ -3,3 +3,6 @@ data/
 *.log
 .env
 *.tmp
+coverage/
+.eslintcache
+.DS_Store

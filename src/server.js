@@ -4,11 +4,14 @@ const config = require('./config');
 const store = require('./store');
 const worker = require('./worker');
 const { createApp } = require('./app');
+const { createLogger } = require('./logging');
+
+const logger = createLogger({ base: { component: 'server' } });
 
 let server = null;
 
 function log(level, msg, fields) {
-  console.log(JSON.stringify(Object.assign({ ts: new Date().toISOString(), level, msg }, fields || {})));
+  logger[level](msg, fields);
 }
 
 async function start() {
@@ -37,7 +40,9 @@ async function shutdown(signal) {
   worker.stop();
   await worker.drain().catch(() => {});
   const finish = () => {
-    Promise.resolve(store.close()).catch(() => {}).then(() => process.exit(0));
+    Promise.resolve(store.close())
+      .catch(() => {})
+      .then(() => process.exit(0));
   };
   if (server) server.close(finish);
   else finish();

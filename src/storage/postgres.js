@@ -1,11 +1,35 @@
 'use strict';
 
 const { Pool } = require('pg');
-const { nowIso, genId, hashApiKey } = require('../util');
+const { nowIso, genId, hashApiKey, encodeCursor, decodeCursor } = require('../util');
 const { runMigrations } = require('./migrate');
+const { createLogger } = require('../logging');
+
+const logger = createLogger({ base: { component: 'store' } });
 
 function iso(value) {
   return value ? new Date(value).toISOString() : null;
+}
+
+/**
+ * Append the keyset cursor predicate to a WHERE clause.
+ *
+ * The cursor carries `(created_at, id)`. A timestamp-only cursor silently
+ * skipped rows that shared a timestamp, so the id tie-breaker is part of the
+ * comparison. Placeholder positions are captured explicitly because the two
+ * values must not be swapped.
+ */
+function applyCursor(where, params, cursor) {
+  if (!cursor) return;
+  if (cursor.i) {
+    params.push(cursor.c, cursor.i);
+    const createdAtPos = params.length - 1;
+    const idPos = params.length;
+    where.push('(created_at, id) < ($' + createdAtPos + '::timestamptz, $' + idPos + ')');
+  } else {
+    params.push(cursor.c);
+    where.push('created_at < $' + params.length + '::timestamptz');
+  }
 }
 
 function mapEvent(row) {
@@ -76,8 +100,7 @@ function createStore(config) {
   const pool = new Pool(poolConfig);
 
   function log(level, msg, fields) {
-    if (process.env.SIGNALMESH_LOG_LEVEL === 'silent') return;
-    console.log(JSON.stringify(Object.assign({ ts: nowIso(), level, msg }, fields || {})));
+    logger[level](msg, fields);
   }
 
   return {
@@ -135,10 +158,15 @@ function createStore(config) {
         createdAt: nowIso(),
         revokedAt: null,
       };
-      await pool.query(
-        'INSERT INTO api_keys (id, organization_id, name, key_hash, prefix, scopes, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-        [rec.id, rec.organizationId, rec.name, rec.keyHash, rec.prefix, JSON.stringify(rec.scopes), rec.createdAt]
-      );
+      await pool.query('INSERT INTO api_keys (id, organization_id, name, key_hash, prefix, scopes, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)', [
+        rec.id,
+        rec.organizationId,
+        rec.name,
+        rec.keyHash,
+        rec.prefix,
+        JSON.stringify(rec.scopes),
+        rec.createdAt,
+      ]);
       return { id: rec.id, name: rec.name, key, prefix: rec.prefix, scopes: rec.scopes, organizationId: rec.organizationId, createdAt: rec.createdAt };
     },
 
@@ -159,10 +187,7 @@ function createStore(config) {
     },
 
     async revokeKey(id, organizationId) {
-      const res = await pool.query(
-        'UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND organization_id = $2 AND revoked_at IS NULL RETURNING *',
-        [id, organizationId]
-      );
+      const res = await pool.query('UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND organization_id = $2 AND revoked_at IS NULL RETURNING *', [id, organizationId]);
       if (!res.rowCount) {
         const existing = await pool.query('SELECT * FROM api_keys WHERE id = $1 AND organization_id = $2', [id, organizationId]);
         return existing.rowCount ? { id: existing.rows[0].id, name: existing.rows[0].name, revokedAt: iso(existing.rows[0].revoked_at) } : null;
@@ -196,7 +221,7 @@ function createStore(config) {
         await client.query('BEGIN');
         if (idempotency) {
           const existing = await client.query(
-            'SELECT request_hash, response_body FROM idempotency_records WHERE organization_id = $1 AND operation = $2 AND idempotency_key = $3',
+            'SELECT request_hash, response_body FROM idempotency_records WHERE organization_id = $1 AND operation = $2 AND idempotency_key = $3 AND (expires_at IS NULL OR expires_at > now())',
             [idempotency.organizationId, idempotency.operation, idempotency.key]
           );
           if (existing.rowCount) {
@@ -206,10 +231,15 @@ function createStore(config) {
           }
         }
 
-        await client.query(
-          'INSERT INTO events (id, organization_id, event_type, data, occurred_at, metadata, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-          [event.id, event.organizationId, event.eventType, JSON.stringify(event.data || {}), event.occurredAt || null, JSON.stringify(event.metadata || {}), event.createdAt]
-        );
+        await client.query('INSERT INTO events (id, organization_id, event_type, data, occurred_at, metadata, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)', [
+          event.id,
+          event.organizationId,
+          event.eventType,
+          JSON.stringify(event.data || {}),
+          event.occurredAt || null,
+          JSON.stringify(event.metadata || {}),
+          event.createdAt,
+        ]);
 
         for (const d of deliveries) {
           await client.query(
@@ -221,7 +251,17 @@ function createStore(config) {
         if (idempotency) {
           await client.query(
             'INSERT INTO idempotency_records (id, organization_id, operation, idempotency_key, request_hash, response_status, response_body, expires_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-            [genId('idem'), idempotency.organizationId, idempotency.operation, idempotency.key, idempotency.requestHash, idempotency.responseStatus || 202, JSON.stringify(idempotency.responseBody || null), idempotency.expiresAt || null, nowIso()]
+            [
+              genId('idem'),
+              idempotency.organizationId,
+              idempotency.operation,
+              idempotency.key,
+              idempotency.requestHash,
+              idempotency.responseStatus || 202,
+              JSON.stringify(idempotency.responseBody || null),
+              idempotency.expiresAt || null,
+              nowIso(),
+            ]
           );
         }
 
@@ -231,7 +271,7 @@ function createStore(config) {
         await client.query('ROLLBACK');
         if (err && err.code === '23505' && idempotency) {
           const existing = await pool.query(
-            'SELECT request_hash, response_body FROM idempotency_records WHERE organization_id = $1 AND operation = $2 AND idempotency_key = $3',
+            'SELECT request_hash, response_body FROM idempotency_records WHERE organization_id = $1 AND operation = $2 AND idempotency_key = $3 AND (expires_at IS NULL OR expires_at > now())',
             [idempotency.organizationId, idempotency.operation, idempotency.key]
           );
           if (existing.rowCount) {
@@ -253,27 +293,23 @@ function createStore(config) {
         params.push(f.eventType);
         where.push('event_type = $' + params.length);
       }
-      if (f.cursor) {
-        params.push(f.cursor);
-        where.push('created_at < $' + params.length);
-      }
+      const cursor = decodeCursor(f.cursor);
+      applyCursor(where, params, cursor);
       const limit = Math.min(Math.max(1, parseInt(f.limit, 10) || 50), 200);
       params.push(limit + 1);
-      const res = await pool.query(
-        'SELECT * FROM events WHERE ' + where.join(' AND ') + ' ORDER BY created_at DESC LIMIT $' + params.length,
-        params
-      );
+      const res = await pool.query('SELECT * FROM events WHERE ' + where.join(' AND ') + ' ORDER BY created_at DESC, id DESC LIMIT $' + params.length, params);
       const rows = res.rows.slice(0, limit).map(mapEvent);
-      const next = res.rows.length > limit ? rows[rows.length - 1].createdAt : null;
-      const count = await pool.query('SELECT count(*)::int AS n FROM events WHERE organization_id = $1' + (f.eventType ? ' AND event_type = $2' : ''), f.eventType ? [f.organizationId, f.eventType] : [f.organizationId]);
+      const last = rows[rows.length - 1];
+      const next = res.rows.length > limit && last ? encodeCursor(last.createdAt, last.id) : null;
+      const count = await pool.query(
+        'SELECT count(*)::int AS n FROM events WHERE organization_id = $1' + (f.eventType ? ' AND event_type = $2' : ''),
+        f.eventType ? [f.organizationId, f.eventType] : [f.organizationId]
+      );
       return { data: rows, next_cursor: next, total: count.rows[0].n };
     },
 
     async getEvent(id, organizationId) {
-      const res = await pool.query(
-        'SELECT * FROM events WHERE id = $1' + (organizationId ? ' AND organization_id = $2' : ''),
-        organizationId ? [id, organizationId] : [id]
-      );
+      const res = await pool.query('SELECT * FROM events WHERE id = $1' + (organizationId ? ' AND organization_id = $2' : ''), organizationId ? [id, organizationId] : [id]);
       return res.rowCount ? mapEvent(res.rows[0]) : null;
     },
 
@@ -285,21 +321,53 @@ function createStore(config) {
     async insertEndpoint(endpoint) {
       await pool.query(
         'INSERT INTO endpoints (id, organization_id, name, url, event_types, active, signing_secret, timeout_ms, max_attempts, base_delay_ms, max_delay_ms, created_at, updated_at, deleted_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)',
-        [endpoint.id, endpoint.organizationId, endpoint.name, endpoint.url, JSON.stringify(endpoint.eventTypes || ['*']), endpoint.active, endpoint.signingSecret, endpoint.timeoutMs, endpoint.maxAttempts, endpoint.baseDelayMs, endpoint.maxDelayMs, endpoint.createdAt, endpoint.updatedAt, endpoint.deletedAt || null]
+        [
+          endpoint.id,
+          endpoint.organizationId,
+          endpoint.name,
+          endpoint.url,
+          JSON.stringify(endpoint.eventTypes || ['*']),
+          endpoint.active,
+          endpoint.signingSecret,
+          endpoint.timeoutMs,
+          endpoint.maxAttempts,
+          endpoint.baseDelayMs,
+          endpoint.maxDelayMs,
+          endpoint.createdAt,
+          endpoint.updatedAt,
+          endpoint.deletedAt || null,
+        ]
       );
       return endpoint;
     },
 
     async listEndpoints(organizationId) {
-      const res = await pool.query('SELECT * FROM endpoints WHERE organization_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC', [organizationId]);
+      const res = await pool.query('SELECT * FROM endpoints WHERE organization_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC, id DESC', [organizationId]);
       return res.rows.map(mapEndpoint);
     },
 
+    /**
+     * Paginated variant used by the API. `listEndpoints` stays unpaginated
+     * because fan-out at ingest time must see every subscribed endpoint.
+     */
+    async listEndpointsPage(filter) {
+      const f = filter || {};
+      const params = [f.organizationId];
+      const where = ['organization_id = $1', 'deleted_at IS NULL'];
+      const cursor = decodeCursor(f.cursor);
+      applyCursor(where, params, cursor);
+      const limit = Math.min(Math.max(1, parseInt(f.limit, 10) || 50), 200);
+      params.push(limit + 1);
+      const res = await pool.query('SELECT * FROM endpoints WHERE ' + where.join(' AND ') + ' ORDER BY created_at DESC, id DESC LIMIT $' + params.length, params);
+      const rows = res.rows.slice(0, limit).map(mapEndpoint);
+      const last = rows[rows.length - 1];
+      const next = res.rows.length > limit && last ? encodeCursor(last.createdAt, last.id) : null;
+      const count = await pool.query('SELECT count(*)::int AS n FROM endpoints WHERE organization_id = $1 AND deleted_at IS NULL', [f.organizationId]);
+      return { data: rows, next_cursor: next, total: count.rows[0].n };
+    },
+
     async getEndpoint(id, organizationId) {
-      const res = await pool.query(
-        'SELECT * FROM endpoints WHERE id = $1 AND deleted_at IS NULL' + (organizationId ? ' AND organization_id = $2' : ''),
-        organizationId ? [id, organizationId] : [id]
-      );
+      const res = await pool.query('SELECT * FROM endpoints WHERE id = $1 AND deleted_at IS NULL' + (organizationId ? ' AND organization_id = $2' : ''), organizationId ? [id, organizationId] : [id]);
       return res.rowCount ? mapEndpoint(res.rows[0]) : null;
     },
 
@@ -328,10 +396,7 @@ function createStore(config) {
       }
       if (!sets.length) return this.getEndpoint(id, organizationId);
       sets.push('updated_at = now()');
-      const res = await pool.query(
-        'UPDATE endpoints SET ' + sets.join(', ') + ' WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL RETURNING *',
-        params
-      );
+      const res = await pool.query('UPDATE endpoints SET ' + sets.join(', ') + ' WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL RETURNING *', params);
       return res.rowCount ? mapEndpoint(res.rows[0]) : null;
     },
 
@@ -344,10 +409,10 @@ function createStore(config) {
     },
 
     async softDeleteEndpoint(id, organizationId) {
-      const res = await pool.query(
-        'UPDATE endpoints SET active = false, deleted_at = now(), updated_at = now() WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL RETURNING *',
-        [id, organizationId]
-      );
+      const res = await pool.query('UPDATE endpoints SET active = false, deleted_at = now(), updated_at = now() WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL RETURNING *', [
+        id,
+        organizationId,
+      ]);
       return res.rowCount ? mapEndpoint(res.rows[0]) : null;
     },
 
@@ -355,7 +420,18 @@ function createStore(config) {
     async insertDelivery(delivery) {
       await pool.query(
         'INSERT INTO deliveries (id, organization_id, event_id, event_type, endpoint_id, status, attempt_count, next_attempt_at, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
-        [delivery.id, delivery.organizationId, delivery.eventId, delivery.eventType, delivery.endpointId, delivery.status, delivery.attemptCount || 0, delivery.nextAttemptAt || null, delivery.createdAt, delivery.updatedAt]
+        [
+          delivery.id,
+          delivery.organizationId,
+          delivery.eventId,
+          delivery.eventType,
+          delivery.endpointId,
+          delivery.status,
+          delivery.attemptCount || 0,
+          delivery.nextAttemptAt || null,
+          delivery.createdAt,
+          delivery.updatedAt,
+        ]
       );
       return delivery;
     },
@@ -376,33 +452,75 @@ function createStore(config) {
       // Cursor applies to the page query only; the total is the full filtered set.
       const pageParams = baseParams.slice();
       const pageWhere = baseWhere.slice();
-      if (f.cursor) {
-        pageParams.push(f.cursor);
-        pageWhere.push('created_at < $' + pageParams.length);
-      }
+      const cursor = decodeCursor(f.cursor);
+      applyCursor(pageWhere, pageParams, cursor);
       const limit = Math.min(Math.max(1, parseInt(f.limit, 10) || 50), 200);
       pageParams.push(limit + 1);
 
-      const res = await pool.query(
-        'SELECT * FROM deliveries WHERE ' + pageWhere.join(' AND ') + ' ORDER BY created_at DESC LIMIT $' + pageParams.length,
-        pageParams
-      );
+      const res = await pool.query('SELECT * FROM deliveries WHERE ' + pageWhere.join(' AND ') + ' ORDER BY created_at DESC, id DESC LIMIT $' + pageParams.length, pageParams);
       const rows = res.rows.slice(0, limit).map(mapDelivery);
-      const next = res.rows.length > limit ? rows[rows.length - 1].createdAt : null;
+      const last = rows[rows.length - 1];
+      const next = res.rows.length > limit && last ? encodeCursor(last.createdAt, last.id) : null;
       const count = await pool.query('SELECT count(*)::int AS n FROM deliveries WHERE ' + baseWhere.join(' AND '), baseParams);
       return { data: rows, next_cursor: next, total: count.rows[0].n };
     },
 
     async getDelivery(id, organizationId) {
-      const res = await pool.query(
-        'SELECT * FROM deliveries WHERE id = $1' + (organizationId ? ' AND organization_id = $2' : ''),
-        organizationId ? [id, organizationId] : [id]
-      );
+      const res = await pool.query('SELECT * FROM deliveries WHERE id = $1' + (organizationId ? ' AND organization_id = $2' : ''), organizationId ? [id, organizationId] : [id]);
       if (!res.rowCount) return null;
       const delivery = mapDelivery(res.rows[0]);
       const event = await this.getEvent(delivery.eventId, null);
       const endpoint = await this.getEndpoint(delivery.endpointId, null);
       return { delivery, event, endpoint };
+    },
+
+    /**
+     * Attempt history for a delivery. The worker writes attempts to the
+     * store, but they were never exposed through the API, so a customer
+     * could not tell *why* a webhook failed.
+     */
+    async listAttempts(deliveryId, organizationId) {
+      const res = await pool.query(
+        `SELECT da.attempt_number, da.started_at, da.finished_at, da.status_code,
+                da.duration_ms, da.error_class, da.response_excerpt
+           FROM delivery_attempts da
+           JOIN deliveries d ON d.id = da.delivery_id
+          WHERE da.delivery_id = $1` +
+          (organizationId ? ' AND d.organization_id = $2' : '') +
+          `
+          ORDER BY da.attempt_number ASC`,
+        organizationId ? [deliveryId, organizationId] : [deliveryId]
+      );
+      if (!res.rowCount) {
+        const exists = await pool.query('SELECT 1 FROM deliveries WHERE id = $1' + (organizationId ? ' AND organization_id = $2' : ''), organizationId ? [deliveryId, organizationId] : [deliveryId]);
+        return exists.rowCount ? [] : null;
+      }
+      return res.rows.map((row) => ({
+        attempt_number: row.attempt_number,
+        started_at: iso(row.started_at),
+        finished_at: iso(row.finished_at),
+        status_code: row.status_code == null ? null : row.status_code,
+        duration_ms: row.duration_ms == null ? null : row.duration_ms,
+        error_class: row.error_class || null,
+        response_excerpt: row.response_excerpt || null,
+      }));
+    },
+
+    /**
+     * Delivery counts for many events in one pass. Used by `GET /v1/events`
+     * to avoid an N+1 query storm (one COUNT per event on the page).
+     */
+    async countDeliveriesForEvents(eventIds, organizationId) {
+      const ids = Array.isArray(eventIds) ? eventIds.filter((id) => typeof id === 'string') : [];
+      const counts = new Map();
+      for (const id of ids) counts.set(id, 0);
+      if (!ids.length) return counts;
+      const res = await pool.query('SELECT event_id, count(*)::int AS n FROM deliveries WHERE ($1::text IS NULL OR organization_id = $1) AND event_id = ANY($2::text[]) GROUP BY event_id', [
+        organizationId || null,
+        ids,
+      ]);
+      for (const row of res.rows) counts.set(row.event_id, row.n);
+      return counts;
     },
 
     async updateDelivery(id, organizationId, patch) {
@@ -416,10 +534,7 @@ function createStore(config) {
       }
       if (!sets.length) return (await this.getDelivery(id, organizationId)).delivery;
       sets.push('updated_at = now()');
-      const res = await pool.query(
-        'UPDATE deliveries SET ' + sets.join(', ') + ' WHERE id = $1 AND organization_id = $2 RETURNING *',
-        params
-      );
+      const res = await pool.query('UPDATE deliveries SET ' + sets.join(', ') + ' WHERE id = $1 AND organization_id = $2 RETURNING *', params);
       return res.rowCount ? mapDelivery(res.rows[0]) : null;
     },
 
@@ -442,6 +557,48 @@ function createStore(config) {
         [workerId, leaseMs]
       );
       return res.rowCount ? mapDelivery(res.rows[0]) : null;
+    },
+
+    /**
+     * Extend the lease of an in-flight delivery.
+     *
+     * A delivery whose HTTP timeout exceeds the lease would otherwise be
+     * reclaimed by a second worker while the first attempt was still running,
+     * producing a duplicate webhook. The worker renews the lease for as long
+     * as the attempt is in flight.
+     */
+    async renewLease(deliveryId, workerId, leaseMs) {
+      const res = await pool.query(
+        `UPDATE deliveries
+            SET locked_until = now() + ($3::int * interval '1 millisecond')
+          WHERE id = $1 AND (locked_by = $2 OR locked_by IS NULL) AND status = 'processing'
+        RETURNING id`,
+        [deliveryId, workerId, leaseMs]
+      );
+      return res.rowCount > 0;
+    },
+
+    /**
+     * Record worker liveness. Readiness reporting uses this so a deployment
+     * whose workers have all died does not keep advertising itself as ready.
+     */
+    async recordWorkerHeartbeat(workerId, role) {
+      await pool.query(
+        `INSERT INTO worker_heartbeats (worker_id, role, last_seen_at, started_at)
+         VALUES ($1, $2, now(), now())
+         ON CONFLICT (worker_id) DO UPDATE SET last_seen_at = now()`,
+        [workerId, role || 'worker']
+      );
+      await pool.query("DELETE FROM worker_heartbeats WHERE last_seen_at < now() - interval '5 minutes'");
+    },
+
+    async listWorkerHeartbeats() {
+      const res = await pool.query('SELECT worker_id, role, last_seen_at FROM worker_heartbeats ORDER BY last_seen_at DESC');
+      return res.rows.map((row) => ({
+        worker_id: row.worker_id,
+        role: row.role,
+        last_seen_at: iso(row.last_seen_at),
+      }));
     },
 
     async recordAttempt(input) {
@@ -493,9 +650,7 @@ function createStore(config) {
            AND (next_attempt_at IS NULL OR next_attempt_at <= now())
            AND (locked_until IS NULL OR locked_until < now())`
       );
-      const age = await pool.query(
-        `SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) AS age FROM deliveries WHERE status = 'pending'`
-      );
+      const age = await pool.query(`SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) AS age FROM deliveries WHERE status = 'pending'`);
       const seconds = age.rows[0].age == null ? 0 : Number(age.rows[0].age);
       return { queueDepth: depth.rows[0].n, oldestPendingAgeSeconds: seconds };
     },
@@ -508,21 +663,29 @@ function createStore(config) {
     // ---- audit ---------------------------------------------------------
     async appendAudit(record) {
       const row = Object.assign({ id: genId('aud'), createdAt: nowIso() }, record);
-      await pool.query(
-        'INSERT INTO audit_log (id, organization_id, actor_key_id, action, resource_type, resource_id, metadata, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-        [row.id, row.organizationId || null, row.actorKeyId || null, row.action, row.resourceType || null, row.resourceId || null, row.metadata ? JSON.stringify(row.metadata) : null, row.createdAt]
-      );
+      await pool.query('INSERT INTO audit_log (id, organization_id, actor_key_id, action, resource_type, resource_id, metadata, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [
+        row.id,
+        row.organizationId || null,
+        row.actorKeyId || null,
+        row.action,
+        row.resourceType || null,
+        row.resourceId || null,
+        row.metadata ? JSON.stringify(row.metadata) : null,
+        row.createdAt,
+      ]);
       return row;
     },
 
     async listAudit(filter) {
       const f = filter || {};
+      const params = [f.organizationId];
+      const where = ['organization_id = $1'];
+      const cursor = decodeCursor(f.cursor);
+      applyCursor(where, params, cursor);
       const limit = Math.min(Math.max(1, parseInt(f.limit, 10) || 50), 200);
-      const res = await pool.query(
-        'SELECT * FROM audit_log WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2',
-        [f.organizationId, limit]
-      );
-      const data = res.rows.map((row) => ({
+      params.push(limit + 1);
+      const res = await pool.query('SELECT * FROM audit_log WHERE ' + where.join(' AND ') + ' ORDER BY created_at DESC, id DESC LIMIT $' + params.length, params);
+      const data = res.rows.slice(0, limit).map((row) => ({
         id: row.id,
         organizationId: row.organization_id,
         actorKeyId: row.actor_key_id,
@@ -532,7 +695,38 @@ function createStore(config) {
         metadata: row.metadata,
         createdAt: iso(row.created_at),
       }));
-      return { data, next_cursor: null, total: data.length };
+      const last = data[data.length - 1];
+      const next = res.rows.length > limit && last ? encodeCursor(last.createdAt, last.id) : null;
+      const count = await pool.query('SELECT count(*)::int AS n FROM audit_log WHERE organization_id = $1', [f.organizationId]);
+      return { data, next_cursor: next, total: count.rows[0].n };
+    },
+
+    /**
+     * Remove expired idempotency records and rows past their retention
+     * window. Without this the tables grow without bound and the
+     * idempotency table keeps answering for keys that should be reusable.
+     */
+    async sweepExpired(options) {
+      const opts = options || {};
+      const idem = await pool.query('DELETE FROM idempotency_records WHERE expires_at IS NOT NULL AND expires_at <= now()');
+      let events = { rowCount: 0 };
+      let deliveries = { rowCount: 0 };
+      let audit = { rowCount: 0 };
+      if (opts.eventDays) {
+        events = await pool.query("DELETE FROM events WHERE created_at < now() - ($1::int * interval '1 day')", [opts.eventDays]);
+      }
+      if (opts.deliveryDays) {
+        deliveries = await pool.query("DELETE FROM deliveries WHERE created_at < now() - ($1::int * interval '1 day')", [opts.deliveryDays]);
+      }
+      if (opts.auditDays) {
+        audit = await pool.query("DELETE FROM audit_log WHERE created_at < now() - ($1::int * interval '1 day')", [opts.auditDays]);
+      }
+      return {
+        idempotencyRemoved: idem.rowCount,
+        eventsRemoved: events.rowCount,
+        deliveriesRemoved: deliveries.rowCount,
+        auditRemoved: audit.rowCount,
+      };
     },
   };
 }

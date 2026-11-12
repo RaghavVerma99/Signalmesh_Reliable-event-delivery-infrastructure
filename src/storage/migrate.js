@@ -15,7 +15,10 @@ const ADVISORY_LOCK_ID = 724001;
  */
 async function runMigrations(pool, logger) {
   const dir = path.join(__dirname, 'migrations');
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+  const files = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
 
   const client = await pool.connect();
   try {

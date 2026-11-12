@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -109,7 +109,11 @@ test('claim marks processing and recordAttempt schedules a retry', async () => {
     assert.equal(ok.delivery.attemptCount, 2);
     void worker;
   } finally {
-    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
   }
 });
 
@@ -129,7 +133,11 @@ test('a stale worker cannot overwrite a newer claim', async () => {
     const current = await store.getDelivery('dlv_test', null);
     assert.equal(current.delivery.status, 'processing');
   } finally {
-    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
   }
 });
 
@@ -143,6 +151,10 @@ test('worker dead-letters a destination that fails the SSRF check', async () => 
     assert.equal(result.delivery.status, 'dead_lettered');
     assert.equal(result.delivery.lastError, 'destination_blocked');
   } finally {
-    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
   }
 });

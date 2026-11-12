@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -80,7 +80,11 @@ test('tenant isolation scopes events, endpoints and deliveries', async () => {
     assert.equal(await store.getEndpoint('ep_a', b.id), null);
     assert.equal(await store.getEndpoint('ep_b', a.id), null);
   } finally {
-    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
   }
 });
 
@@ -98,20 +102,28 @@ test('idempotent ingest returns duplicate for same hash and conflict for a diffe
     const first = await store.ingestEvent(base);
     assert.equal(first.status, 'created');
 
-    const dup = await store.ingestEvent(Object.assign({}, base, {
-      event: Object.assign({}, base.event, { id: 'evt_2' }),
-      idempotency: Object.assign({}, base.idempotency, { requestHash: 'hash-1', responseBody: { event_id: 'evt_2' } }),
-    }));
+    const dup = await store.ingestEvent(
+      Object.assign({}, base, {
+        event: Object.assign({}, base.event, { id: 'evt_2' }),
+        idempotency: Object.assign({}, base.idempotency, { requestHash: 'hash-1', responseBody: { event_id: 'evt_2' } }),
+      })
+    );
     assert.equal(dup.status, 'duplicate');
     assert.equal(dup.responseBody.event_id, 'evt_1');
 
-    const conflict = await store.ingestEvent(Object.assign({}, base, {
-      event: Object.assign({}, base.event, { id: 'evt_3' }),
-      idempotency: Object.assign({}, base.idempotency, { requestHash: 'hash-2', responseBody: { event_id: 'evt_3' } }),
-    }));
+    const conflict = await store.ingestEvent(
+      Object.assign({}, base, {
+        event: Object.assign({}, base.event, { id: 'evt_3' }),
+        idempotency: Object.assign({}, base.idempotency, { requestHash: 'hash-2', responseBody: { event_id: 'evt_3' } }),
+      })
+    );
     assert.equal(conflict.status, 'conflict');
   } finally {
-    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
   }
 });
 
@@ -133,7 +145,11 @@ test('event listing paginates with a cursor', async () => {
     const second = await store.listEvents({ organizationId: org.id, limit: 2, cursor: first.next_cursor });
     assert.equal(second.data.length, 1);
   } finally {
-    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
   }
 });
 
@@ -147,7 +163,11 @@ test('audit log is tenant scoped', async () => {
     assert.equal((await store.listAudit({ organizationId: a.id })).total, 1);
     assert.equal((await store.listAudit({ organizationId: b.id })).total, 0);
   } finally {
-    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
   }
 });
 
@@ -166,6 +186,10 @@ test('rotateEndpointSecret preserves the previous secret and is tenant scoped', 
     const crossTenant = await store.rotateEndpointSecret('ep_rotate', b.id, 'enc:hijack');
     assert.equal(crossTenant, null);
   } finally {
-    try { fs.unlinkSync(dataFile); } catch (e) { /* ignore */ }
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
   }
 });
