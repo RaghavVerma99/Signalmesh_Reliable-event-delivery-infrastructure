@@ -1,0 +1,17 @@
+# Code owners
+#
+# Replace @your-org with the GitHub organisation that should be requested for
+# review. Every change to a path below should require an approval from the
+# listed owner before it can be merged.
+
+*       @your-org/signalmesh-maintainers
+
+# Security-sensitive paths need a security review as well.
+/src/security.js   @your-org/signalmesh-security
+/src/scopes.js     @your-org/signalmesh-security
+/src/storage/      @your-org/signalmesh-maintainers
+/src/worker.js     @your-org/signalmesh-maintainers
+
+# CI and release configuration
+/.github/           @your-org/signalmesh-maintainers
+/Dockerfile         @your-org/signalmesh-maintainers

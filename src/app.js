@@ -25,6 +25,12 @@ function errorBody(code, message, requestId) {
   return { error: { code, message, request_id: requestId } };
 }
 
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a || ''));
+  const right = Buffer.from(String(b || ''));
+  return left.length === right.length && left.length > 0 && crypto.timingSafeEqual(left, right);
+}
+
 function publicEndpoint(ep) {
   if (!ep) return null;
   return {
@@ -617,6 +623,12 @@ function createApp(deps) {
       const result = await store.getDelivery(req.params.id, req.organizationId);
       if (!result) return res.status(404).json(errorBody('not_found', 'Delivery not found', req.id));
       const original = result.delivery;
+      // Replay is only meaningful for a delivery that is not in flight.
+      // Queueing a new generation for a pending/processing delivery would
+      // double-deliver or race the active attempt (FR-009/FR-010).
+      if (original.status === 'pending' || original.status === 'processing') {
+        return res.status(409).json(errorBody('conflict', 'Delivery is not in a replayable state', req.id));
+      }
       const newDelivery = await store.insertDelivery({
         id: genId('dlv'),
         organizationId: req.organizationId,
@@ -633,7 +645,7 @@ function createApp(deps) {
         attempts: [],
       });
       const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason : null;
-      await audit(req, 'delivery.replayed', 'delivery', newDelivery.id, { replay_of: original.id, reason });
+      await audit(req, 'delivery.replayed', 'delivery', original.id, { replay_delivery_id: newDelivery.id, reason });
       log('info', 'delivery_replayed', { organization_id: req.organizationId, delivery_id: original.id, replay_delivery_id: newDelivery.id, reason });
       return res.status(202).json({ delivery_id: newDelivery.id, status: 'pending', replay_of: original.id, reason });
     })
@@ -703,6 +715,26 @@ function createApp(deps) {
       res.type('html').send(renderDashboard());
     });
   }
+
+  // Optional scheduler-driven worker tick, for platforms that cannot run a
+  // long-lived worker (e.g. Vercel + external cron). Disabled unless a token
+  // is configured.
+  app.all(
+    '/internal/worker-tick',
+    asyncHandler(async (req, res) => {
+      if (!config.internalToken) {
+        return res.status(404).json(errorBody('not_found', 'Route not found', req.id));
+      }
+      const header = req.headers.authorization || '';
+      const bearer = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
+      const provided = bearer || req.headers['x-signalmesh-internal-token'] || '';
+      if (!safeEqual(provided, config.internalToken)) {
+        return res.status(401).json(errorBody('unauthorized', 'Invalid internal token', req.id));
+      }
+      await worker.tick();
+      return res.json({ ok: true, worker_id: worker.workerId });
+    })
+  );
 
   app.use((req, res) => {
     res.status(404).json(errorBody('not_found', 'Route not found', req.id));

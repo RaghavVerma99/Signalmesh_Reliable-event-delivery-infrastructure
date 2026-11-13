@@ -35,7 +35,16 @@ function createStore(options) {
 
   function flush() {
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(dataFile, JSON.stringify(state));
+    // Durability (NFR-001): write + fsync before returning so an acknowledged
+    // write survives process crash / power loss. A bare writeFileSync only
+    // pushes to the OS page cache, which is NOT crash-durable.
+    const fd = fs.openSync(dataFile, 'w');
+    try {
+      fs.writeSync(fd, JSON.stringify(state));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
   }
 
   function load() {
