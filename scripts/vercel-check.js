@@ -41,6 +41,11 @@ async function json(base, method, p, body, headers) {
 }
 
 async function main() {
+  // The handler works in isolation, but a real deployment also needs the
+  // platform-level rewrite. Verify that configuration instead of assuming it.
+  const vercelConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'vercel.json'), 'utf8'));
+  assert(Array.isArray(vercelConfig.rewrites) && vercelConfig.rewrites.some((r) => r.source === '/(.*)' && r.destination === '/api/index'), 'vercel.json must rewrite all public paths to /api/index');
+
   const server = http.createServer((req, res) => handler(req, res));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = 'http://127.0.0.1:' + server.address().port;
@@ -61,7 +66,15 @@ async function main() {
     const list = await json(base, 'GET', '/v1/events', undefined, auth);
     assert(list.status === 200 && list.body.total === 1, 'event list should contain one event');
 
+    // Routes outside /v1 are served by the same handler on Vercel.
+    const metrics = await fetch(base + '/metrics');
+    assert(metrics.status === 200 && (await metrics.text()).includes('http_requests_total'), 'metrics should be served by the handler');
+    const missing = await json(base, 'GET', '/not-a-route');
+    assert(missing.status === 404 && missing.body.error.code === 'not_found', 'unknown routes should return the JSON 404 envelope');
+
     console.log('VERCEL HANDLER OK');
+    console.log('Vercel env: SIGNALMESH_ENV=production, SIGNALMESH_STORAGE=postgres, DATABASE_URL, SIGNALMESH_SECRET_ENCRYPTION_KEY, SIGNALMESH_API_KEY_PEPPER');
+    console.log('Run `npm run migrate` as a release step; functions skip migrations automatically.');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     try {

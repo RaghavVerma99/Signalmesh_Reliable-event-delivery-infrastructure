@@ -125,6 +125,34 @@ Copy `.env.example` to `.env` and adjust. Key variables:
 - `scripts/` — seed (`demo:reset`), demo server (`demo:server`), scripted
   demo run (`demo:run`).
 
+## Deploying to Vercel
+
+`api/index.js` is a serverless API handler; `vercel.json` rewrites **all** public
+paths (`/v1/*`, `/healthz`, `/metrics`, `/dashboard`) to it. Vercel cannot run
+the long-lived delivery worker, so run `npm run start:worker` separately (for
+example as a container) against the same PostgreSQL database.
+
+Required Vercel project environment variables:
+
+- `SIGNALMESH_ENV=production`
+- `SIGNALMESH_STORAGE=postgres`
+- `DATABASE_URL` — pooled/SSL-enabled PostgreSQL connection string
+- `SIGNALMESH_SECRET_ENCRYPTION_KEY` — 32-byte hex (signing-secret encryption)
+- `SIGNALMESH_API_KEY_PEPPER` — 32-byte hex (API-key hashing)
+- `SIGNALMESH_SKIP_MIGRATIONS=true` is set automatically by the handler; schema
+  changes must be applied as a **release step** with `npm run migrate`.
+
+The handler fails fast on Vercel if production storage is not PostgreSQL, so a
+misconfigured preview cannot silently write to an ephemeral JSON file.
+Rate limiting is still per-instance on serverless; apply a shared limit at the
+gateway or database layer if you need a hard tenant-wide cap.
+
+Validate the routing and handler locally without a database:
+
+```bash
+npm run vercel:check
+```
+
 ## Demo limitations
 
 - JSON file store is for the local demo only — it rewrites the whole file on

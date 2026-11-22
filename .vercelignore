@@ -1,0 +1,6 @@
+tests/
+data/
+.github/
+coverage/
+*.log
+SIGNALMESH_SPEC.md
