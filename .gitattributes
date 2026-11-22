@@ -1,0 +1,3 @@
+# Normalize checked-out sources to LF on POSIX and keep new files consistent.
+# Existing CRLF blobs are tolerated by Prettier's `endOfLine: auto`.
+* text=auto eol=lf
