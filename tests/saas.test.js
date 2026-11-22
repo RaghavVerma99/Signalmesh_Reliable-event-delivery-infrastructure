@@ -109,6 +109,28 @@ test('scopes: unknown scopes are rejected and an empty scope list grants nothing
   assert.equal(denied.status, 403);
 });
 
+test('scopes: keys:write cannot mint an admin key', async () => {
+  const manager = await newKey('key-manager', ['keys:write']);
+
+  // Omitting scopes used to default to `admin` for every caller.
+  const implicit = await req('POST', '/v1/keys', { key: manager, body: { name: 'implicit' } });
+  assert.equal(implicit.status, 201);
+  assert.deepEqual(implicit.body.key.scopes, ['keys:write', 'keys:read']);
+
+  // Explicitly requesting a scope the caller does not hold is also denied.
+  const explicit = await req('POST', '/v1/keys', { key: manager, body: { name: 'escalated', scopes: ['admin'] } });
+  assert.equal(explicit.status, 403);
+  assert.equal(explicit.body.error.code, 'forbidden');
+
+  const denied = await req('GET', '/v1/audit', { key: implicit.body.key.key });
+  assert.equal(denied.status, 403, 'the delegated key must not inherit audit access');
+
+  // An admin key can still grant any valid scope.
+  const byAdmin = await req('POST', '/v1/keys', { key: adminKey, body: { name: 'admin-created', scopes: ['audit:read'] } });
+  assert.equal(byAdmin.status, 201);
+  assert.deepEqual(byAdmin.body.key.scopes, ['audit:read']);
+});
+
 test('scopes: write scope implies read scope, admin implies everything', () => {
   assert.equal(hasScope({ scopes: ['events:write'] }, 'events:read'), true);
   assert.equal(hasScope({ scopes: ['admin'] }, 'deliveries:write'), true);

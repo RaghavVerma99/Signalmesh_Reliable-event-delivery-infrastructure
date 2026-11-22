@@ -10,7 +10,7 @@ const { genId, stableStringify, hashToken, nowIso, newRequestId } = require('./u
 const { validateDeliveryUrl, verifyDeliverySignature, encryptSecret, decryptSecret } = require('./security');
 const { createRateLimiter } = require('./ratelimit');
 const { renderDashboard } = require('./dashboard');
-const { normalizeScopes, hasScope, isValidScope, ALL_SCOPES } = require('./scopes');
+const { normalizeScopes, hasScope, grantedScopes, isValidScope, ALL_SCOPES } = require('./scopes');
 const { createLogger } = require('./logging');
 
 const logger = createLogger({ base: { component: 'api' } });
@@ -227,11 +227,22 @@ function createApp(deps) {
         const org = await store.createOrganization(orgName);
         organizationId = org.id;
       }
-      const requestedScopes = Array.isArray(body.scopes) ? body.scopes : null;
-      if (requestedScopes) {
-        const unknown = requestedScopes.filter((s) => typeof s !== 'string' || !isValidScope(s));
-        if (unknown.length) {
-          return res.status(422).json(errorBody('validation_failed', 'unknown scope(s): ' + unknown.join(', ') + '. Available: ' + ALL_SCOPES.join(', '), req.id));
+      const ownScopes = Array.isArray(req.key && req.key.scopes) ? req.key.scopes : [];
+      const legacyAdmin = !!(req.key && !Array.isArray(req.key.scopes));
+      // Bootstrap and legacy scope-less keys explicitly create admin keys.
+      // Every other caller defaults to its own scopes when none are supplied.
+      const requestedScopes = Array.isArray(body.scopes) ? body.scopes : req.bootstrap || legacyAdmin ? ['admin'] : ownScopes;
+      const unknown = requestedScopes.filter((s) => typeof s !== 'string' || !isValidScope(s));
+      if (unknown.length) {
+        return res.status(422).json(errorBody('validation_failed', 'unknown scope(s): ' + unknown.join(', ') + '. Available: ' + ALL_SCOPES.join(', '), req.id));
+      }
+      // Scope delegation is monotonic: a non-admin caller cannot grant a
+      // scope it does not itself hold (including `admin`).
+      if (!req.bootstrap && !hasScope(req.key, 'admin')) {
+        const grantable = grantedScopes(ownScopes);
+        const denied = requestedScopes.filter((s) => !grantable.has(s));
+        if (denied.length) {
+          return res.status(403).json(errorBody('forbidden', 'Cannot grant scope(s) not held by the caller: ' + denied.join(', '), req.id));
         }
       }
       const scopes = normalizeScopes(requestedScopes);
