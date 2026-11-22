@@ -401,6 +401,30 @@ function createStore(options) {
     },
 
     /**
+     * Recover deliveries abandoned by a worker that died mid-attempt.
+     *
+     * An expired lease must make the delivery claimable again. Without this,
+     * `processing` rows stay stuck forever because the claim query only looks
+     * at pending/retry_scheduled deliveries.
+     */
+    async reclaimExpiredLeases() {
+      const now = Date.now();
+      let reclaimed = 0;
+      for (const d of state.deliveries) {
+        if (d.status !== 'processing' || !d.lockedUntil) continue;
+        if (new Date(d.lockedUntil).getTime() > now) continue;
+        d.status = 'pending';
+        d.lockedBy = null;
+        d.lockedUntil = null;
+        d.nextAttemptAt = null;
+        d.updatedAt = nowIso();
+        reclaimed++;
+      }
+      if (reclaimed) flush();
+      return reclaimed;
+    },
+
+    /**
      * Extend the lease of an in-flight delivery.
      *
      * A delivery whose HTTP timeout exceeds the lease would otherwise be

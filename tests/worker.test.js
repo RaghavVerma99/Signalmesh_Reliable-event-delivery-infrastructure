@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const { createJsonStore } = require('../src/store');
 const { createWorker, computeBackoffMs, RETRYABLE_STATUS } = require('../src/worker');
+const metrics = require('../src/metrics');
 
 function tempStore() {
   const dataFile = path.join(os.tmpdir(), 'signalmesh-worker-' + Date.now() + '-' + Math.random().toString(16).slice(2) + '.json');
@@ -132,6 +133,82 @@ test('a stale worker cannot overwrite a newer claim', async () => {
     assert.equal(stale.stale, true);
     const current = await store.getDelivery('dlv_test', null);
     assert.equal(current.delivery.status, 'processing');
+  } finally {
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+test('expired leases are reclaimed and the delivery becomes claimable again', async () => {
+  const { store, dataFile } = tempStore();
+  try {
+    await store.init();
+    await seedDelivery(store);
+    await store.claimDueDelivery('dead-worker', 5);
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Claiming still skips a `processing` row even after its lease expires.
+    assert.equal(await store.claimDueDelivery('live-worker', 1000), null);
+    assert.equal(await store.reclaimExpiredLeases(), 1);
+
+    const recovered = (await store.getDelivery('dlv_test', null)).delivery;
+    assert.equal(recovered.status, 'pending');
+    assert.equal(recovered.lockedBy, null);
+    assert.equal(recovered.lockedUntil, null);
+    assert.equal(recovered.attemptCount, 0, 'attempt history is preserved, not reset');
+
+    const claimed = await store.claimDueDelivery('live-worker', 1000);
+    assert.ok(claimed);
+    assert.equal(claimed.lockedBy, 'live-worker');
+    assert.equal(await store.reclaimExpiredLeases(), 0, 'live leases must not be reclaimed');
+  } finally {
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+test('worker tick reclaims expired leases before claiming new work', async () => {
+  const { store, dataFile } = tempStore();
+  try {
+    await store.init();
+    let calls = 0;
+    const spy = Object.assign({}, store, {
+      reclaimExpiredLeases: async () => {
+        calls++;
+        return 0;
+      },
+    });
+    const worker = createWorker(spy, { workerId: 'w-tick' });
+    await worker.tick();
+    assert.equal(calls, 1);
+  } finally {
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+test('a stale attempt is not counted as a successful delivery', async () => {
+  const { store, dataFile } = tempStore();
+  try {
+    await store.init();
+    await seedDelivery(store);
+    await store.claimDueDelivery('worker-a', 30000);
+
+    const successCounter = () => Number((metrics.renderPrometheus().match(/^delivery_success_total (\d+)$/m) || [])[1] || 0);
+    const before = successCounter();
+    const worker = createWorker(store, { workerId: 'worker-b' });
+    const result = await worker.runAttempt((await store.getDelivery('dlv_test', null)).delivery);
+    assert.equal(result.stale, true);
+    assert.equal(successCounter(), before, 'stale attempts must not increment delivery_success_total');
   } finally {
     try {
       fs.unlinkSync(dataFile);

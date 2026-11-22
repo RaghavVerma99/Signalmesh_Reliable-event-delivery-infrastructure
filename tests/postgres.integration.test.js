@@ -151,3 +151,68 @@ test('postgres store: durable ingest, tenant scoping, claim and attempt', { skip
     await store.close();
   }
 });
+
+test('postgres store: expired leases are reclaimed', { skip: !pgUrl }, async () => {
+  const store = createPostgresStore({ connectionString: pgUrl });
+  await store.init();
+  try {
+    const suffix = Date.now().toString(36) + Math.random().toString(16).slice(2);
+    const org = await store.createOrganization('pg-lease-' + suffix);
+    const now = new Date().toISOString();
+    const endpointId = 'ep_pg_lease_' + suffix;
+    const eventId = 'evt_pg_lease_' + suffix;
+    const deliveryId = 'dlv_pg_lease_' + suffix;
+    await store.insertEndpoint({
+      id: endpointId,
+      organizationId: org.id,
+      name: 'lease',
+      url: 'http://127.0.0.1:9/hook',
+      eventTypes: ['*'],
+      active: true,
+      signingSecret: 'plain:whsec_pg',
+      timeoutMs: 1000,
+      maxAttempts: 3,
+      baseDelayMs: 10,
+      maxDelayMs: 100,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    });
+    await store.ingestEvent({
+      event: { id: eventId, organizationId: org.id, eventType: 'x', data: {}, occurredAt: null, metadata: {}, createdAt: now, deliveries: [deliveryId] },
+      deliveries: [
+        {
+          id: deliveryId,
+          organizationId: org.id,
+          eventId,
+          eventType: 'x',
+          endpointId,
+          status: 'pending',
+          attemptCount: 0,
+          nextAttemptAt: now,
+          lastStatusCode: null,
+          lastError: null,
+          createdAt: now,
+          updatedAt: now,
+          attempts: [],
+        },
+      ],
+      idempotency: null,
+    });
+
+    const claimed = await store.claimDueDelivery('pg-dead-worker', 1);
+    assert.equal(claimed.id, deliveryId);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(await store.claimDueDelivery('pg-live-worker', 1000), null, 'a processing row must not be claimed directly');
+    assert.equal(await store.reclaimExpiredLeases(), 1);
+
+    const recovered = await store.getDelivery(deliveryId, org.id);
+    assert.equal(recovered.delivery.status, 'pending');
+    assert.equal(recovered.delivery.lockedBy, null);
+    assert.equal(recovered.delivery.attemptCount, 0);
+    assert.equal((await store.claimDueDelivery('pg-live-worker', 5000)).id, deliveryId);
+    assert.equal(await store.reclaimExpiredLeases(), 0, 'live leases must not be reclaimed');
+  } finally {
+    await store.close();
+  }
+});

@@ -241,6 +241,18 @@ function createStore(config) {
           event.createdAt,
         ]);
 
+        // Release expired idempotency keys inside the ingest transaction.
+        // A plain UNIQUE constraint rejects the reinsert after a TTL has
+        // elapsed; deleting here also serialises concurrent reusers on the
+        // row lock instead of turning the second request into a 503.
+        if (idempotency) {
+          await client.query('DELETE FROM idempotency_records WHERE organization_id = $1 AND operation = $2 AND idempotency_key = $3 AND expires_at IS NOT NULL AND expires_at <= now()', [
+            idempotency.organizationId,
+            idempotency.operation,
+            idempotency.key,
+          ]);
+        }
+
         for (const d of deliveries) {
           await client.query(
             'INSERT INTO deliveries (id, organization_id, event_id, event_type, endpoint_id, status, attempt_count, next_attempt_at, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
@@ -270,13 +282,18 @@ function createStore(config) {
       } catch (err) {
         await client.query('ROLLBACK');
         if (err && err.code === '23505' && idempotency) {
-          const existing = await pool.query(
-            'SELECT request_hash, response_body FROM idempotency_records WHERE organization_id = $1 AND operation = $2 AND idempotency_key = $3 AND (expires_at IS NULL OR expires_at > now())',
-            [idempotency.organizationId, idempotency.operation, idempotency.key]
-          );
-          if (existing.rowCount) {
-            if (existing.rows[0].request_hash !== idempotency.requestHash) return { status: 'conflict' };
-            return { status: 'duplicate', responseBody: existing.rows[0].response_body };
+          // A concurrent request may have won the unique-key race. Look at
+          // the winner regardless of expiry: an already-expired row must not
+          // be reported as a duplicate, because its key is reusable.
+          const existing = await pool.query('SELECT request_hash, response_body, expires_at FROM idempotency_records WHERE organization_id = $1 AND operation = $2 AND idempotency_key = $3', [
+            idempotency.organizationId,
+            idempotency.operation,
+            idempotency.key,
+          ]);
+          const row = existing.rows[0];
+          if (row && (!row.expires_at || new Date(row.expires_at).getTime() > Date.now())) {
+            if (row.request_hash !== idempotency.requestHash) return { status: 'conflict' };
+            return { status: 'duplicate', responseBody: row.response_body };
           }
         }
         throw err;
@@ -557,6 +574,25 @@ function createStore(config) {
         [workerId, leaseMs]
       );
       return res.rowCount ? mapDelivery(res.rows[0]) : null;
+    },
+
+    /**
+     * Recover deliveries abandoned by a worker that died mid-attempt.
+     *
+     * A single conditional UPDATE is atomic across workers: concurrent
+     * reapers compete for the row lock and only one of them resets it. The
+     * attempt history and attempt_count are intentionally preserved.
+     */
+    async reclaimExpiredLeases() {
+      const res = await pool.query(
+        `UPDATE deliveries
+         SET status = 'pending', locked_by = NULL, locked_until = NULL, next_attempt_at = NULL, updated_at = now()
+         WHERE status = 'processing'
+           AND locked_until IS NOT NULL
+           AND locked_until < now()
+         RETURNING id`
+      );
+      return res.rowCount;
     },
 
     /**

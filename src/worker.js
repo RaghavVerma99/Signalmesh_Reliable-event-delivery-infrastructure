@@ -259,12 +259,19 @@ function createWorker(store, options) {
 
     if (outcome.type !== 'succeeded') attempt.errorClass = outcome.error || null;
 
-    recordDeliveryOutcome(outcome, Date.now() - startedAtMs);
     let result;
     try {
       result = await store.recordAttempt({ deliveryId: delivery.id, workerId, attempt, outcome });
     } finally {
       stopRenewal();
+    }
+    // A stale or missing write must not be counted as a delivered outcome:
+    // the lease may have been reclaimed and the delivery redelivered.
+    if (!result || result.stale) {
+      metrics.inc('delivery_stale_attempts_total');
+      logger.warn('attempt_not_recorded', { delivery_id: delivery.id, worker_id: workerId, stale: !!(result && result.stale) });
+    } else {
+      recordDeliveryOutcome(outcome, attempt.durationMs == null ? Date.now() - startedAtMs : attempt.durationMs);
     }
     return result;
   }
@@ -273,6 +280,19 @@ function createWorker(store, options) {
     if (running || stopping) return;
     running = true;
     try {
+      // Recover work abandoned by workers that died mid-attempt before
+      // looking at queue metrics or claiming new deliveries.
+      if (store.reclaimExpiredLeases) {
+        try {
+          const reclaimed = await store.reclaimExpiredLeases();
+          if (reclaimed > 0) {
+            metrics.inc('lease_reclaims_total', reclaimed);
+            logger.info('expired_leases_reclaimed', { worker_id: workerId, count: reclaimed });
+          }
+        } catch (err) {
+          logger.warn('lease_reclaim_failed', { worker_id: workerId, error: String(err && err.message ? err.message : err) });
+        }
+      }
       metrics.setGauge('worker_last_tick_timestamp_seconds', Date.now() / 1000);
       if (store.recordWorkerHeartbeat) {
         try {
