@@ -48,6 +48,20 @@ function httpPost(urlString, headers, body, timeoutMs) {
     }
     const lib = url.protocol === 'https:' ? https : http;
     const payload = Buffer.from(body, 'utf8');
+    let settled = false;
+    let deadline = null;
+    const succeed = (value) => {
+      if (settled) return;
+      settled = true;
+      if (deadline) clearTimeout(deadline);
+      resolve(value);
+    };
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      if (deadline) clearTimeout(deadline);
+      reject(err);
+    };
     const req = lib.request(
       {
         protocol: url.protocol,
@@ -69,14 +83,14 @@ function httpPost(urlString, headers, body, timeoutMs) {
           size += chunk.length;
         });
         res.on('end', () =>
-          resolve({
+          succeed({
             statusCode: res.statusCode,
             headers: res.headers,
             body: Buffer.concat(chunks).toString('utf8') || null,
             truncated: size > MAX_RESPONSE_BYTES,
           })
         );
-        res.on('error', reject);
+        res.on('error', fail);
       }
     );
     req.setTimeout(timeoutMs, () => {
@@ -84,7 +98,14 @@ function httpPost(urlString, headers, body, timeoutMs) {
       err.code = 'ETIMEDOUT';
       req.destroy(err);
     });
-    req.on('error', reject);
+    // Socket inactivity is not a deadline: a server that dribbles one byte
+    // per interval would hold a worker slot forever. Bound the whole request.
+    deadline = setTimeout(() => {
+      const err = new Error('request deadline exceeded');
+      err.code = 'ETIMEDOUT';
+      req.destroy(err);
+    }, timeoutMs);
+    req.on('error', fail);
     req.write(payload);
     req.end();
   });
@@ -279,8 +300,7 @@ function createWorker(store, options) {
     return result;
   }
 
-  async function tick() {
-    if (running || stopping) return;
+  async function tickInternal() {
     running = true;
     try {
       // Recover work abandoned by workers that died mid-attempt before
@@ -332,11 +352,24 @@ function createWorker(store, options) {
     }
   }
 
+  /**
+   * All tick entry points go through here so `inFlight` always points at the
+   * real in-progress tick. Previously the interval overwrote it with an
+   * already-resolved promise when a tick was still running, letting drain()
+   * return while an HTTP attempt was active.
+   */
+  function tick() {
+    if (running || stopping) return inFlight;
+    inFlight = tickInternal();
+    return inFlight;
+  }
+
   function start() {
     if (timer) return;
     stopping = false;
     timer = setInterval(() => {
-      inFlight = tick().catch((err) => {
+      if (running || stopping) return;
+      tick().catch((err) => {
         logger.error('worker_tick_failed', { worker_id: workerId, error: String(err && err.message ? err.message : err) });
       });
     }, pollIntervalMs);

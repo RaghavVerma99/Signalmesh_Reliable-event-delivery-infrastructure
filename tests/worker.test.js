@@ -3,6 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const http = require('http');
 const os = require('os');
 const path = require('path');
 const { createJsonStore } = require('../src/store');
@@ -228,6 +229,77 @@ test('worker dead-letters a destination that fails the SSRF check', async () => 
     assert.equal(result.delivery.status, 'dead_lettered');
     assert.equal(result.delivery.lastError, 'destination_blocked');
   } finally {
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+test('drain waits for an in-flight tick started by the interval', async () => {
+  const { store, dataFile } = tempStore();
+  try {
+    await store.init();
+    const queueMetrics = store.queueMetrics.bind(store);
+    const slowStore = Object.assign({}, store, {
+      queueMetrics: async () => {
+        await new Promise((r) => setTimeout(r, 120));
+        return queueMetrics();
+      },
+    });
+    const worker = createWorker(slowStore, { workerId: 'w-drain', pollIntervalMs: 40 });
+    worker.start();
+    // The first tick is inside queueMetrics; a second interval has already
+    // fired and (previously) replaced inFlight with a resolved promise.
+    await new Promise((r) => setTimeout(r, 100));
+    worker.stop();
+    const started = Date.now();
+    await worker.drain();
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 30, `drain returned after ${elapsed}ms while the tick was still running`);
+  } finally {
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+test('a hard deadline stops a slow-drip response from holding a worker slot', { timeout: 5000 }, async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    const write = () => {
+      try {
+        res.write('x');
+      } catch {
+        /* socket already closed */
+      }
+    };
+    write();
+    const interval = setInterval(write, 20);
+    req.on('close', () => clearInterval(interval));
+    res.on('error', () => clearInterval(interval));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const { store, dataFile } = tempStore();
+  try {
+    await store.init();
+    const seeded = await seedDelivery(store, 'http://127.0.0.1:' + port + '/hook');
+    await store.updateEndpoint(seeded.ep.id, seeded.org.id, { timeoutMs: 120 });
+    const worker = createWorker(store, { workerId: 'w-deadline' });
+    const delivery = (await store.getDelivery('dlv_test', null)).delivery;
+    const started = Date.now();
+    const result = await worker.runAttempt(delivery);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 100, 'the slow endpoint should have been contacted');
+    assert.ok(elapsed < 2000, `the hard deadline should bound the attempt, took ${elapsed}ms`);
+    assert.equal(result.delivery.lastError, 'timeout');
+  } finally {
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
     try {
       fs.unlinkSync(dataFile);
     } catch {
