@@ -75,6 +75,7 @@ function mapDelivery(row) {
     status: row.status,
     attemptCount: row.attempt_count,
     nextAttemptAt: iso(row.next_attempt_at),
+    cancelRequested: !!row.cancel_requested,
     lockedBy: row.locked_by,
     lockedUntil: iso(row.locked_until),
     lastStatusCode: row.last_status_code,
@@ -555,6 +556,73 @@ function createStore(config) {
       return res.rowCount ? mapDelivery(res.rows[0]) : null;
     },
 
+    /**
+     * Cancel a queued delivery in one conditional update. The status
+     * predicate is the compare-and-swap: a worker that already claimed the
+     * row wins, and this call reports the conflict instead of overwriting the
+     * committed outcome.
+     */
+    async cancelDelivery(id, organizationId) {
+      const res = await pool.query(
+        `UPDATE deliveries
+         SET status = 'cancelled', next_attempt_at = NULL, locked_by = NULL,
+             locked_until = NULL, cancel_requested = false, updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+           AND status IN ('pending','retry_scheduled')
+         RETURNING *`,
+        [id, organizationId]
+      );
+      return res.rowCount ? mapDelivery(res.rows[0]) : null;
+    },
+
+    /** Flag an in-flight delivery; the active HTTP request is not interrupted. */
+    async requestCancellation(id, organizationId) {
+      const res = await pool.query(
+        `UPDATE deliveries SET cancel_requested = true, updated_at = now()
+         WHERE id = $1 AND organization_id = $2 AND status = 'processing'
+         RETURNING *`,
+        [id, organizationId]
+      );
+      return res.rowCount ? mapDelivery(res.rows[0]) : null;
+    },
+
+    /** Atomically validate the source status and insert a replay generation. */
+    async insertReplayDelivery(originalId, organizationId, allowedStatuses, delivery) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const source = await client.query('SELECT status FROM deliveries WHERE id = $1 AND organization_id = $2 FOR UPDATE', [originalId, organizationId]);
+        if (!source.rowCount || !allowedStatuses.includes(source.rows[0].status)) {
+          await client.query('ROLLBACK');
+          return null;
+        }
+        const res = await client.query(
+          `INSERT INTO deliveries (id, organization_id, event_id, event_type, endpoint_id, status, attempt_count, next_attempt_at, cancel_requested, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+          [
+            delivery.id,
+            delivery.organizationId,
+            delivery.eventId,
+            delivery.eventType,
+            delivery.endpointId,
+            delivery.status,
+            delivery.attemptCount || 0,
+            delivery.nextAttemptAt || null,
+            false,
+            delivery.createdAt,
+            delivery.updatedAt,
+          ]
+        );
+        await client.query('COMMIT');
+        return mapDelivery(res.rows[0]);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+
     async claimDueDelivery(workerId, leaseMs) {
       const res = await pool.query(
         `WITH candidate AS (
@@ -642,14 +710,20 @@ function createStore(config) {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        const cur = await client.query('SELECT locked_by FROM deliveries WHERE id = $1 FOR UPDATE', [deliveryId]);
+        const cur = await client.query('SELECT * FROM deliveries WHERE id = $1 FOR UPDATE', [deliveryId]);
         if (!cur.rowCount) {
           await client.query('ROLLBACK');
           return null;
         }
-        if (cur.rows[0].locked_by && workerId && cur.rows[0].locked_by !== workerId) {
+        const current = cur.rows[0];
+        if (current.locked_by && workerId && current.locked_by !== workerId) {
           await client.query('ROLLBACK');
           return { delivery: null, stale: true, dead: false };
+        }
+        // A cancelled row must never be resurrected by a late worker outcome.
+        if (current.status === 'cancelled') {
+          await client.query('ROLLBACK');
+          return { delivery: mapDelivery(current), stale: false, cancelled: true, dead: false };
         }
 
         await client.query(
@@ -660,17 +734,23 @@ function createStore(config) {
         let status = 'dead_lettered';
         let nextAttemptAt = null;
         if (outcome.type === 'succeeded') status = 'succeeded';
-        else if (outcome.type === 'retry') {
+        else if (outcome.type === 'retry' && current.cancel_requested) {
+          status = 'cancelled';
+        } else if (outcome.type === 'retry') {
           status = 'retry_scheduled';
           nextAttemptAt = new Date(Date.now() + (outcome.delayMs || 0)).toISOString();
         }
 
         const res = await client.query(
-          'UPDATE deliveries SET status = $2, attempt_count = $3, next_attempt_at = $4, locked_by = NULL, locked_until = NULL, last_status_code = $5, last_error = $6, updated_at = now() WHERE id = $1 RETURNING *',
+          `UPDATE deliveries
+           SET status = $2, attempt_count = $3, next_attempt_at = $4, locked_by = NULL,
+               locked_until = NULL, cancel_requested = false,
+               last_status_code = $5, last_error = $6, updated_at = now()
+           WHERE id = $1 RETURNING *`,
           [deliveryId, status, attempt.attemptNumber, nextAttemptAt, outcome.statusCode || null, outcome.error || null]
         );
         await client.query('COMMIT');
-        return { delivery: mapDelivery(res.rows[0]), dead: outcome.type === 'dead', stale: false };
+        return { delivery: mapDelivery(res.rows[0]), dead: outcome.type === 'dead', stale: false, cancelled: false };
       } catch (err) {
         await client.query('ROLLBACK');
         throw err;

@@ -15,6 +15,13 @@ const { createLogger } = require('./logging');
 
 const logger = createLogger({ base: { component: 'api' } });
 
+// Replay creates a new delivery generation. Only terminal outcomes may be
+// replayed: replaying a pending/retry_scheduled delivery would race its
+// existing attempt, and replaying a cancelled one would undo an operator's
+// explicit decision.
+const REPLAYABLE_STATUSES = new Set(['succeeded', 'dead_lettered']);
+const TERMINAL_DELIVERY_STATUSES = new Set(['succeeded', 'dead_lettered', 'cancelled']);
+
 function asyncHandler(fn) {
   return function wrapped(req, res, next) {
     Promise.resolve(fn(req, res, next)).catch(next);
@@ -58,6 +65,7 @@ function publicDelivery(d) {
     next_attempt_at: d.nextAttemptAt || null,
     last_status_code: d.lastStatusCode || null,
     last_error: d.lastError || null,
+    cancel_requested: !!d.cancelRequested,
     created_at: d.createdAt,
     updated_at: d.updatedAt,
   };
@@ -634,13 +642,11 @@ function createApp(deps) {
       const result = await store.getDelivery(req.params.id, req.organizationId);
       if (!result) return res.status(404).json(errorBody('not_found', 'Delivery not found', req.id));
       const original = result.delivery;
-      // Replay is only meaningful for a delivery that is not in flight.
-      // Queueing a new generation for a pending/processing delivery would
-      // double-deliver or race the active attempt (FR-009/FR-010).
-      if (original.status === 'pending' || original.status === 'processing') {
+      if (!REPLAYABLE_STATUSES.has(original.status)) {
         return res.status(409).json(errorBody('conflict', 'Delivery is not in a replayable state', req.id));
       }
-      const newDelivery = await store.insertDelivery({
+      const now = nowIso();
+      const replay = {
         id: genId('dlv'),
         organizationId: req.organizationId,
         eventId: original.eventId,
@@ -648,17 +654,24 @@ function createApp(deps) {
         endpointId: original.endpointId,
         status: 'pending',
         attemptCount: 0,
-        nextAttemptAt: nowIso(),
+        nextAttemptAt: now,
+        cancelRequested: false,
         lastStatusCode: null,
         lastError: null,
-        createdAt: nowIso(),
-        updatedAt: nowIso(),
+        createdAt: now,
+        updatedAt: now,
         attempts: [],
-      });
+      };
+      // The status check and the insert happen in one store operation so two
+      // concurrent replays cannot both create a generation from the same row.
+      const created = await store.insertReplayDelivery(original.id, req.organizationId, [...REPLAYABLE_STATUSES], replay);
+      if (!created) {
+        return res.status(409).json(errorBody('conflict', 'Delivery is not in a replayable state', req.id));
+      }
       const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason : null;
-      await audit(req, 'delivery.replayed', 'delivery', original.id, { replay_delivery_id: newDelivery.id, reason });
-      log('info', 'delivery_replayed', { organization_id: req.organizationId, delivery_id: original.id, replay_delivery_id: newDelivery.id, reason });
-      return res.status(202).json({ delivery_id: newDelivery.id, status: 'pending', replay_of: original.id, reason });
+      await audit(req, 'delivery.replayed', 'delivery', original.id, { replay_delivery_id: created.id, reason });
+      log('info', 'delivery_replayed', { organization_id: req.organizationId, delivery_id: original.id, replay_delivery_id: created.id, reason });
+      return res.status(202).json({ delivery_id: created.id, status: 'pending', replay_of: original.id, reason });
     })
   );
 
@@ -666,18 +679,37 @@ function createApp(deps) {
     '/v1/deliveries/:id/cancel',
     requireScope('deliveries:write'),
     asyncHandler(async (req, res) => {
-      const result = await store.getDelivery(req.params.id, req.organizationId);
+      const id = req.params.id;
+      const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason : null;
+      const result = await store.getDelivery(id, req.organizationId);
       if (!result) return res.status(404).json(errorBody('not_found', 'Delivery not found', req.id));
       const original = result.delivery;
+      if (TERMINAL_DELIVERY_STATUSES.has(original.status)) {
+        return res.json({ delivery_id: id, status: original.status });
+      }
+
       if (original.status === 'processing') {
-        return res.status(409).json(errorBody('conflict', 'Delivery is currently processing', req.id));
+        // Cooperative cancellation: flag the in-flight attempt so no further
+        // attempt is scheduled, but never interrupt the HTTP request itself.
+        const flagged = await store.requestCancellation(id, req.organizationId);
+        if (!flagged) return res.status(409).json(errorBody('conflict', 'Delivery state changed', req.id));
+        await audit(req, 'delivery.cancel_requested', 'delivery', id, { reason });
+        return res.json({ delivery_id: id, status: 'processing', cancellation_requested: true });
       }
-      if (original.status === 'succeeded' || original.status === 'dead_lettered' || original.status === 'cancelled') {
-        return res.json({ delivery_id: original.id, status: original.status });
+
+      // pending / retry_scheduled: a conditional update does the cancel in
+      // one step, so a worker cannot overwrite it with its outcome.
+      const cancelled = await store.cancelDelivery(id, req.organizationId);
+      if (cancelled) {
+        await audit(req, 'delivery.cancelled', 'delivery', id, { reason });
+        return res.json({ delivery_id: id, status: 'cancelled' });
       }
-      await store.updateDelivery(original.id, req.organizationId, { status: 'cancelled', nextAttemptAt: null });
-      await audit(req, 'delivery.cancelled', 'delivery', original.id, { reason: (req.body && req.body.reason) || null });
-      return res.json({ delivery_id: original.id, status: 'cancelled' });
+      // Lost a race with the worker; report the current state if terminal.
+      const fresh = await store.getDelivery(id, req.organizationId);
+      if (fresh && TERMINAL_DELIVERY_STATUSES.has(fresh.delivery.status)) {
+        return res.json({ delivery_id: id, status: fresh.delivery.status });
+      }
+      return res.status(409).json(errorBody('conflict', 'Delivery state changed', req.id));
     })
   );
 

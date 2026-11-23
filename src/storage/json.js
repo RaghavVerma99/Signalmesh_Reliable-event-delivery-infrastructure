@@ -61,6 +61,11 @@ function createStore(options) {
         audit: parsed.audit || [],
         worker_heartbeats: parsed.worker_heartbeats || [],
       };
+      // Files written before cancellation support have no flag; normalise it
+      // in memory so every consumer sees the same shape.
+      for (const d of state.deliveries) {
+        if (d.cancelRequested === undefined) d.cancelRequested = false;
+      }
       migrateLegacy();
     } catch {
       state = blankState();
@@ -209,7 +214,10 @@ function createStore(options) {
         }
       }
       state.events.push(event);
-      for (const d of deliveries) state.deliveries.push(d);
+      for (const d of deliveries) {
+        if (d.cancelRequested === undefined) d.cancelRequested = false;
+        state.deliveries.push(d);
+      }
       if (idempotency) {
         const key = idemId(idempotency.organizationId, idempotency.operation, idempotency.key);
         state.idempotency[key] = {
@@ -308,9 +316,10 @@ function createStore(options) {
 
     // ---- deliveries ----------------------------------------------------
     async insertDelivery(delivery) {
-      state.deliveries.push(delivery);
+      const row = Object.assign({ cancelRequested: false }, delivery);
+      state.deliveries.push(row);
       flush();
-      return delivery;
+      return row;
     },
 
     async listDeliveries(filter) {
@@ -375,6 +384,48 @@ function createStore(options) {
       Object.assign(d, patch, { updatedAt: nowIso() });
       flush();
       return d;
+    },
+
+    /**
+     * Cancel a queued delivery in one step. The status predicate is the
+     * compare-and-swap: if a worker claimed the row first, this returns null
+     * instead of overwriting a committed outcome.
+     */
+    async cancelDelivery(id, organizationId) {
+      const d = state.deliveries.find(
+        (row) => row.id === id && row.organizationId === organizationId && (row.status === 'pending' || row.status === 'retry_scheduled')
+      );
+      if (!d) return null;
+      d.status = 'cancelled';
+      d.nextAttemptAt = null;
+      d.lockedBy = null;
+      d.lockedUntil = null;
+      d.cancelRequested = false;
+      d.updatedAt = nowIso();
+      flush();
+      return Object.assign({}, d);
+    },
+
+    /**
+     * Flag an in-flight delivery for cooperative cancellation. The active
+     * HTTP request is not interrupted; no further attempt will be scheduled.
+     */
+    async requestCancellation(id, organizationId) {
+      const d = state.deliveries.find((row) => row.id === id && row.organizationId === organizationId && row.status === 'processing');
+      if (!d) return null;
+      d.cancelRequested = true;
+      d.updatedAt = nowIso();
+      flush();
+      return Object.assign({}, d);
+    },
+
+    /**
+     * Atomically check the source status and insert a replay generation.
+     */
+    async insertReplayDelivery(originalId, organizationId, allowedStatuses, delivery) {
+      const original = state.deliveries.find((row) => row.id === originalId && row.organizationId === organizationId);
+      if (!original || !allowedStatuses.includes(original.status)) return null;
+      return this.insertDelivery(delivery);
     },
 
     async claimDueDelivery(workerId, leaseMs) {
@@ -450,6 +501,10 @@ function createStore(options) {
       if (d.lockedBy && workerId && d.lockedBy !== workerId) {
         return { delivery: d, stale: true, dead: false };
       }
+      // A cancelled row must never be resurrected by a late worker outcome.
+      if (d.status === 'cancelled') {
+        return { delivery: d, stale: false, cancelled: true, dead: false };
+      }
       if (!Array.isArray(d.attempts)) d.attempts = [];
       d.attempts.push(attempt);
       d.attemptCount = attempt.attemptNumber;
@@ -460,7 +515,12 @@ function createStore(options) {
       d.lastError = outcome.error || null;
 
       if (outcome.type === 'succeeded') {
+        // The request completed; record the real result even if cancellation
+        // was requested mid-flight.
         d.status = 'succeeded';
+        d.nextAttemptAt = null;
+      } else if (outcome.type === 'retry' && d.cancelRequested) {
+        d.status = 'cancelled';
         d.nextAttemptAt = null;
       } else if (outcome.type === 'retry') {
         d.status = 'retry_scheduled';
@@ -469,8 +529,9 @@ function createStore(options) {
         d.status = 'dead_lettered';
         d.nextAttemptAt = null;
       }
+      d.cancelRequested = false;
       flush();
-      return { delivery: d, dead: outcome.type === 'dead', stale: false };
+      return { delivery: d, dead: outcome.type === 'dead', stale: false, cancelled: false };
     },
 
     async queueMetrics() {

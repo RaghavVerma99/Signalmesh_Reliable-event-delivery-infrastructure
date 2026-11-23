@@ -332,6 +332,10 @@ paths:
     post:
       tags: [deliveries]
       summary: Replay a delivery (creates a new linked delivery)
+      description: >
+        Only succeeded or dead-lettered deliveries can be replayed. Pending,
+        retry_scheduled, processing and cancelled deliveries return 409: they
+        would race an existing attempt or undo an operator's decision.
       parameters:
         - $ref: '#/components/parameters/Id'
       requestBody:
@@ -343,16 +347,22 @@ paths:
                 reason: { type: string }
       responses:
         '202': { description: Replay scheduled }
+        '409': { $ref: '#/components/responses/Conflict' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /v1/deliveries/{id}/cancel:
     post:
       tags: [deliveries]
       summary: Cancel a pending delivery
+      description: >
+        Pending and retry_scheduled deliveries are cancelled immediately.
+        A processing delivery is flagged with cancel_requested: the active
+        HTTP request is never interrupted, but no further retry will be
+        scheduled. Already-terminal deliveries are a no-op.
       parameters:
         - $ref: '#/components/parameters/Id'
       responses:
-        '200': { description: Cancelled or already terminal }
+        '200': { description: Cancelled, cancellation requested, or already terminal }
         '409': { $ref: '#/components/responses/Conflict' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -531,6 +541,7 @@ components:
           enum: [pending, processing, retry_scheduled, succeeded, dead_lettered, cancelled]
         attempt_count: { type: integer }
         next_attempt_at: { type: string, format: date-time, nullable: true }
+        cancel_requested: { type: boolean, description: True when an in-flight attempt has been asked to stop retrying }
         last_status_code: { type: integer, nullable: true }
         last_error: { type: string, nullable: true }
         created_at: { type: string, format: date-time }

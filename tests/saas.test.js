@@ -70,6 +70,31 @@ async function newKey(name, scopes) {
   return res.body.key.key;
 }
 
+let seedCounter = 0;
+
+/** Create an endpoint + event through the API and return its delivery id. */
+async function seedApiDelivery(key) {
+  const n = ++seedCounter;
+  const eventType = 'cancel.replay.' + n;
+  const ep = await req('POST', '/v1/endpoints', {
+    key,
+    body: { name: 'hooks-' + n, url: base + '/demo/orders', event_types: [eventType] },
+  });
+  assert.equal(ep.status, 201);
+  const evt = await req('POST', '/v1/events', { key, body: { event_type: eventType, data: { n } } });
+  assert.equal(evt.status, 202);
+  const list = await req('GET', '/v1/deliveries?event_id=' + evt.body.event_id, { key });
+  assert.equal(list.status, 200);
+  assert.equal(list.body.total, 1);
+  return { id: list.body.data[0].id, eventId: evt.body.event_id };
+}
+
+async function setDeliveryStatus(id, status) {
+  const found = await store.getDelivery(id, null);
+  assert.ok(found, 'delivery must exist: ' + id);
+  await store.updateDelivery(id, found.delivery.organizationId, { status });
+}
+
 /** A key that belongs to a *different* organization. */
 async function otherTenantKey(name) {
   const org = await store.createOrganization(name);
@@ -332,4 +357,98 @@ test('expired idempotency records are swept', async () => {
   });
   const result = await store.sweepExpired({});
   assert.ok(result.idempotencyRemoved >= 1);
+});
+
+test('replay is restricted to terminal outcomes and creates one new generation', async () => {
+  const { id, eventId } = await seedApiDelivery(adminKey);
+
+  const pending = await req('POST', '/v1/deliveries/' + id + '/replay', { key: adminKey });
+  assert.equal(pending.status, 409);
+  assert.equal(pending.body.error.code, 'conflict');
+
+  await setDeliveryStatus(id, 'retry_scheduled');
+  const retrying = await req('POST', '/v1/deliveries/' + id + '/replay', { key: adminKey });
+  assert.equal(retrying.status, 409, 'replaying a scheduled retry would double-deliver');
+
+  await setDeliveryStatus(id, 'dead_lettered');
+  const replayed = await req('POST', '/v1/deliveries/' + id + '/replay', { key: adminKey, body: { reason: 'operator retry' } });
+  assert.equal(replayed.status, 202);
+  assert.equal(replayed.body.replay_of, id);
+  assert.equal(replayed.body.reason, 'operator retry');
+  assert.notEqual(replayed.body.delivery_id, id);
+
+  const list = await req('GET', '/v1/deliveries?event_id=' + eventId, { key: adminKey });
+  assert.equal(list.body.total, 2, 'exactly one replay generation is created');
+
+  await setDeliveryStatus(id, 'cancelled');
+  const cancelled = await req('POST', '/v1/deliveries/' + id + '/replay', { key: adminKey });
+  assert.equal(cancelled.status, 409, 'cancelled deliveries must stay cancelled');
+
+  const other = await otherTenantKey('replay-other');
+  const cross = await req('POST', '/v1/deliveries/' + id + '/replay', { key: other });
+  assert.equal(cross.status, 404);
+});
+
+test('cancel is atomic, idempotent for terminal states, and cooperative in flight', async () => {
+  const pendingSeed = await seedApiDelivery(adminKey);
+  const cancelled = await req('POST', '/v1/deliveries/' + pendingSeed.id + '/cancel', { key: adminKey });
+  assert.equal(cancelled.status, 200);
+  assert.equal(cancelled.body.status, 'cancelled');
+  assert.equal((await store.getDelivery(pendingSeed.id, null)).delivery.status, 'cancelled');
+
+  const again = await req('POST', '/v1/deliveries/' + pendingSeed.id + '/cancel', { key: adminKey });
+  assert.equal(again.status, 200, 'cancelling a terminal delivery is a no-op');
+
+  const retrySeed = await seedApiDelivery(adminKey);
+  await setDeliveryStatus(retrySeed.id, 'retry_scheduled');
+  const retryCancel = await req('POST', '/v1/deliveries/' + retrySeed.id + '/cancel', { key: adminKey });
+  assert.equal(retryCancel.status, 200);
+  assert.equal(retryCancel.body.status, 'cancelled');
+
+  // A late worker outcome must not resurrect a cancelled delivery.
+  const attempt = {
+    attemptNumber: 1,
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    statusCode: null,
+    durationMs: 1,
+    errorClass: 'network',
+    responseExcerpt: null,
+  };
+  const late = await store.recordAttempt({
+    deliveryId: retrySeed.id,
+    workerId: 'w-late',
+    attempt,
+    outcome: { type: 'retry', error: 'network', delayMs: 1000 },
+  });
+  assert.equal(late.cancelled, true);
+  assert.equal(late.delivery.status, 'cancelled');
+  assert.equal(late.delivery.attempts.length, 0, 'a cancelled delivery records no new attempt');
+
+  const inFlight = await seedApiDelivery(adminKey);
+  await setDeliveryStatus(inFlight.id, 'processing');
+  const requested = await req('POST', '/v1/deliveries/' + inFlight.id + '/cancel', { key: adminKey });
+  assert.equal(requested.status, 200);
+  assert.equal(requested.body.cancellation_requested, true);
+  assert.equal(requested.body.status, 'processing');
+  assert.equal((await store.getDelivery(inFlight.id, null)).delivery.cancelRequested, true);
+
+  const retryResult = await store.recordAttempt({
+    deliveryId: inFlight.id,
+    workerId: 'w-in-flight',
+    attempt,
+    outcome: { type: 'retry', error: 'network', delayMs: 1000 },
+  });
+  assert.equal(retryResult.delivery.status, 'cancelled', 'a flag stop further retries without interrupting the request');
+
+  const succeededSeed = await seedApiDelivery(adminKey);
+  await setDeliveryStatus(succeededSeed.id, 'processing');
+  await req('POST', '/v1/deliveries/' + succeededSeed.id + '/cancel', { key: adminKey });
+  const successResult = await store.recordAttempt({
+    deliveryId: succeededSeed.id,
+    workerId: 'w-in-flight-2',
+    attempt,
+    outcome: { type: 'succeeded', statusCode: 200, error: null },
+  });
+  assert.equal(successResult.delivery.status, 'succeeded', 'a completed HTTP request is recorded truthfully');
 });

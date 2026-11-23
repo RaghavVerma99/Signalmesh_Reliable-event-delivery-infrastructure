@@ -265,11 +265,14 @@ function createWorker(store, options) {
     } finally {
       stopRenewal();
     }
-    // A stale or missing write must not be counted as a delivered outcome:
-    // the lease may have been reclaimed and the delivery redelivered.
+    // Stale, missing and cancelled writes must not be counted as delivered
+    // outcomes: the lease may have been reclaimed or the delivery cancelled.
     if (!result || result.stale) {
       metrics.inc('delivery_stale_attempts_total');
       logger.warn('attempt_not_recorded', { delivery_id: delivery.id, worker_id: workerId, stale: !!(result && result.stale) });
+    } else if (result.cancelled) {
+      metrics.inc('delivery_cancel_skips_total');
+      logger.info('attempt_skipped_cancelled', { delivery_id: delivery.id, worker_id: workerId });
     } else {
       recordDeliveryOutcome(outcome, attempt.durationMs == null ? Date.now() - startedAtMs : attempt.durationMs);
     }

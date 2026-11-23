@@ -216,3 +216,129 @@ test('postgres store: expired leases are reclaimed', { skip: !pgUrl }, async () 
     await store.close();
   }
 });
+
+test('postgres store: cancellation CAS and guarded replay', { skip: !pgUrl }, async () => {
+  const store = createPostgresStore({ connectionString: pgUrl });
+  await store.init();
+  try {
+    const suffix = Date.now().toString(36) + Math.random().toString(16).slice(2);
+    const org = await store.createOrganization('pg-cancel-' + suffix);
+    const now = new Date().toISOString();
+    const endpointId = 'ep_pg_cancel_' + suffix;
+    const eventId = 'evt_pg_cancel_' + suffix;
+    const deliveryId = 'dlv_pg_cancel_' + suffix;
+    await store.insertEndpoint({
+      id: endpointId,
+      organizationId: org.id,
+      name: 'cancel',
+      url: 'http://127.0.0.1:9/hook',
+      eventTypes: ['*'],
+      active: true,
+      signingSecret: 'plain:whsec_pg',
+      timeoutMs: 1000,
+      maxAttempts: 3,
+      baseDelayMs: 10,
+      maxDelayMs: 100,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    });
+    await store.ingestEvent({
+      event: { id: eventId, organizationId: org.id, eventType: 'x', data: {}, occurredAt: null, metadata: {}, createdAt: now, deliveries: [deliveryId] },
+      deliveries: [
+        {
+          id: deliveryId,
+          organizationId: org.id,
+          eventId,
+          eventType: 'x',
+          endpointId,
+          status: 'pending',
+          attemptCount: 0,
+          nextAttemptAt: now,
+          lastStatusCode: null,
+          lastError: null,
+          createdAt: now,
+          updatedAt: now,
+          attempts: [],
+        },
+      ],
+      idempotency: null,
+    });
+
+    const cancelled = await store.cancelDelivery(deliveryId, org.id);
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(await store.cancelDelivery(deliveryId, org.id), null, 'CAS must not re-cancel');
+
+    const attempt = {
+      attemptNumber: 1,
+      startedAt: now,
+      finishedAt: now,
+      statusCode: null,
+      durationMs: 1,
+      errorClass: 'network',
+      responseExcerpt: null,
+    };
+    const late = await store.recordAttempt({
+      deliveryId,
+      workerId: 'pg-late',
+      attempt,
+      outcome: { type: 'retry', error: 'network', delayMs: 1000 },
+    });
+    assert.equal(late.cancelled, true);
+    assert.equal(late.delivery.status, 'cancelled', 'a late attempt must not resurrect a cancelled row');
+
+    await store.updateDelivery(deliveryId, org.id, { status: 'dead_lettered' });
+    const replayId = 'dlv_pg_replay_' + suffix;
+    const replay = await store.insertReplayDelivery(deliveryId, org.id, ['succeeded', 'dead_lettered'], {
+      id: replayId,
+      organizationId: org.id,
+      eventId,
+      eventType: 'x',
+      endpointId,
+      status: 'pending',
+      attemptCount: 0,
+      nextAttemptAt: now,
+      lastStatusCode: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+      attempts: [],
+    });
+    assert.equal(replay.id, replayId);
+    assert.equal(replay.cancelRequested, false);
+
+    await store.updateDelivery(deliveryId, org.id, { status: 'retry_scheduled' });
+    assert.equal(
+      await store.insertReplayDelivery(deliveryId, org.id, ['succeeded', 'dead_lettered'], {
+        id: 'dlv_pg_replay_bad_' + suffix,
+        organizationId: org.id,
+        eventId,
+        eventType: 'x',
+        endpointId,
+        status: 'pending',
+        attemptCount: 0,
+        nextAttemptAt: now,
+        lastStatusCode: null,
+        lastError: null,
+        createdAt: now,
+        updatedAt: now,
+        attempts: [],
+      }),
+      null,
+      'a scheduled retry must not be replayable'
+    );
+
+    await store.updateDelivery(replayId, org.id, { status: 'processing' });
+    const flagged = await store.requestCancellation(replayId, org.id);
+    assert.equal(flagged.cancelRequested, true);
+    const stopped = await store.recordAttempt({
+      deliveryId: replayId,
+      workerId: 'pg-replay-worker',
+      attempt,
+      outcome: { type: 'retry', error: 'network', delayMs: 1000 },
+    });
+    assert.equal(stopped.delivery.status, 'cancelled');
+  } finally {
+    await store.close();
+  }
+});
