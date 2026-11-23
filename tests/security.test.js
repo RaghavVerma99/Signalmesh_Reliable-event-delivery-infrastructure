@@ -2,6 +2,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const path = require('node:path');
 const {
   signDelivery,
   verifyDeliverySignature,
@@ -24,6 +26,17 @@ test('hmac sign and verify roundtrip', () => {
   assert.equal(verifyDeliverySignature(secret, timestamp, sig, body), true);
   assert.equal(verifyDeliverySignature(secret, timestamp, 'v1=' + '0'.repeat(64), body), false);
   assert.equal(verifyDeliverySignature(secret, timestamp, sig, JSON.stringify({ event_id: 'evt_2' })), false);
+});
+
+test('security module loads on Node versions without BlockList.addCIDR', () => {
+  // addCIDR was added in Node 26.8. Simulate the minimum supported runtime
+  // (Node 22) by removing it; requiring security.js must still succeed.
+  const script = `
+    const net = require('node:net');
+    delete net.BlockList.prototype.addCIDR;
+    require('./src/security');
+  `;
+  execFileSync(process.execPath, ['-e', script], { cwd: path.join(__dirname, '..'), stdio: 'pipe' });
 });
 
 test('blocked ip ranges include loopback and private addresses', () => {

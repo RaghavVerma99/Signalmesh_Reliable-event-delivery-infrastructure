@@ -15,22 +15,30 @@ if (IS_PRODUCTION && !SECRET_ENCRYPTION_KEY) {
   throw new Error('SIGNALMESH_SECRET_ENCRYPTION_KEY is required in production');
 }
 
+// `BlockList.addCIDR()` was only added in Node 26.8. The project supports
+// Node 22+, so use `addSubnet()` (available since Node 15) with explicit
+// network/prefix/family values. Same rules, portable across all runtimes.
+const BLOCKED_NETWORKS = [
+  ['10.0.0.0', 8, 'ipv4'],
+  ['172.16.0.0', 12, 'ipv4'],
+  ['192.168.0.0', 16, 'ipv4'],
+  ['100.64.0.0', 10, 'ipv4'],
+  ['192.0.0.0', 24, 'ipv4'],
+  ['127.0.0.0', 8, 'ipv4'],
+  ['169.254.0.0', 16, 'ipv4'],
+  ['0.0.0.0', 8, 'ipv4'],
+  ['224.0.0.0', 4, 'ipv4'],
+  ['240.0.0.0', 4, 'ipv4'],
+  ['::1', 128, 'ipv6'],
+  ['::', 128, 'ipv6'],
+  ['fc00::', 7, 'ipv6'],
+  ['fe80::', 10, 'ipv6'],
+  ['ff00::', 8, 'ipv6'],
+];
 const blockList = new net.BlockList();
-blockList.addCIDR('10.0.0.0/8');
-blockList.addCIDR('172.16.0.0/12');
-blockList.addCIDR('192.168.0.0/16');
-blockList.addCIDR('100.64.0.0/10');
-blockList.addCIDR('192.0.0.0/24');
-blockList.addCIDR('127.0.0.0/8');
-blockList.addCIDR('169.254.0.0/16');
-blockList.addCIDR('0.0.0.0/8');
-blockList.addCIDR('224.0.0.0/4');
-blockList.addCIDR('240.0.0.0/4');
-blockList.addCIDR('::1/128');
-blockList.addCIDR('::/128');
-blockList.addCIDR('fc00::/7');
-blockList.addCIDR('fe80::/10');
-blockList.addCIDR('ff00::/8');
+for (const [network, prefix, family] of BLOCKED_NETWORKS) {
+  blockList.addSubnet(network, prefix, family);
+}
 
 const BLOCKED_OUTBOUND_PORTS = new Set([21, 22, 23, 25, 53, 110, 143, 3306, 5432, 6379, 27017, 15672]);
 
