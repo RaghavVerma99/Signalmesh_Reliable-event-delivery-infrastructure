@@ -1,6 +1,6 @@
 ﻿'use strict';
 
-const { test } = require('node:test');
+const { test, mock } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -191,5 +191,51 @@ test('rotateEndpointSecret preserves the previous secret and is tenant scoped', 
     } catch {
       /* ignore */
     }
+  }
+});
+
+test('atomic flush leaves the previous data file intact on write failure', async () => {
+  const { store, dataFile } = tempStore();
+  try {
+    await store.init();
+    await store.createOrganization('before');
+    const before = fs.readFileSync(dataFile, 'utf8');
+
+    const originalWrite = fs.writeSync;
+    let failNext = true;
+    const writeMock = mock.method(fs, 'writeSync', (fd, content, ...rest) => {
+      if (failNext && String(content).includes('after')) {
+        failNext = false;
+        throw new Error('simulated disk failure');
+      }
+      return originalWrite(fd, content, ...rest);
+    });
+    try {
+      await assert.rejects(store.createOrganization('after'), /simulated disk failure/);
+    } finally {
+      writeMock.mock.restore();
+    }
+
+    assert.equal(fs.readFileSync(dataFile, 'utf8'), before, 'the committed file must not be truncated by a failed write');
+    const tempFiles = fs.readdirSync(path.dirname(dataFile)).filter((name) => name.startsWith('.' + path.basename(dataFile)) && name.endsWith('.tmp'));
+    assert.deepEqual(tempFiles, [], 'failed writes must clean up their temp file');
+  } finally {
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+test('corrupt data file fails closed instead of starting with blank state', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'signalmesh-corrupt-'));
+  const dataFile = path.join(dir, 'db.json');
+  fs.writeFileSync(dataFile, '{definitely not json');
+  try {
+    assert.throws(() => createJsonStore({ dataFile }), /SignalMesh data file is corrupt/);
+    assert.equal(fs.readFileSync(dataFile, 'utf8'), '{definitely not json', 'a corrupt file must never be overwritten');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

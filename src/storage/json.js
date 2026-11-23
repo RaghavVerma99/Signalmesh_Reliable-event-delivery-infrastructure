@@ -35,41 +35,70 @@ function createStore(options) {
 
   function flush() {
     fs.mkdirSync(dataDir, { recursive: true });
-    // Durability (NFR-001): write + fsync before returning so an acknowledged
-    // write survives process crash / power loss. A bare writeFileSync only
-    // pushes to the OS page cache, which is NOT crash-durable.
-    const fd = fs.openSync(dataFile, 'w');
+    // Durability (NFR-001): write a complete temp file, fsync it, then rename
+    // it over the data file. Opening the live file with 'w' truncates it before
+    // the new content reaches disk, so a crash mid-write destroyed all data.
+    const tempFile = path.join(dataDir, '.' + path.basename(dataFile) + '.' + process.pid + '.tmp');
     try {
-      fs.writeSync(fd, JSON.stringify(state));
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
+      const fd = fs.openSync(tempFile, 'w');
+      try {
+        fs.writeSync(fd, JSON.stringify(state));
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(tempFile, dataFile);
+    } catch (err) {
+      try {
+        fs.unlinkSync(tempFile);
+      } catch {
+        /* nothing to clean up */
+      }
+      throw err;
+    }
+    // Fsync the directory so the rename itself is durable. Some platforms
+    // (notably Windows) do not allow fsync on directory handles.
+    try {
+      const dirFd = fs.openSync(dataDir, 'r');
+      try {
+        fs.fsyncSync(dirFd);
+      } finally {
+        fs.closeSync(dirFd);
+      }
+    } catch {
+      /* directory fsync unsupported on this platform */
     }
   }
 
   function load() {
+    if (!fs.existsSync(dataFile)) return;
+    let parsed;
     try {
-      if (!fs.existsSync(dataFile)) return;
-      const parsed = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
-      state = {
-        organizations: parsed.organizations || [],
-        keys: parsed.keys || [],
-        events: parsed.events || [],
-        endpoints: parsed.endpoints || [],
-        deliveries: parsed.deliveries || [],
-        idempotency: parsed.idempotency || {},
-        audit: parsed.audit || [],
-        worker_heartbeats: parsed.worker_heartbeats || [],
-      };
-      // Files written before cancellation support have no flag; normalise it
-      // in memory so every consumer sees the same shape.
-      for (const d of state.deliveries) {
-        if (d.cancelRequested === undefined) d.cancelRequested = false;
-      }
-      migrateLegacy();
-    } catch {
-      state = blankState();
+      parsed = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+    } catch (err) {
+      // Fail closed. Falling back to blankState() turned one truncated byte
+      // into silent, total data loss on the next write.
+      throw new Error('SignalMesh data file is corrupt: ' + dataFile + ': ' + err.message, { cause: err });
     }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('SignalMesh data file is corrupt: ' + dataFile + ': expected a JSON object');
+    }
+    state = {
+      organizations: parsed.organizations || [],
+      keys: parsed.keys || [],
+      events: parsed.events || [],
+      endpoints: parsed.endpoints || [],
+      deliveries: parsed.deliveries || [],
+      idempotency: parsed.idempotency || {},
+      audit: parsed.audit || [],
+      worker_heartbeats: parsed.worker_heartbeats || [],
+    };
+    // Files written before cancellation support have no flag; normalise it
+    // in memory so every consumer sees the same shape.
+    for (const d of state.deliveries) {
+      if (d.cancelRequested === undefined) d.cancelRequested = false;
+    }
+    migrateLegacy();
   }
 
   // Older files have no organization scoping. Create a default org and attach
@@ -392,9 +421,7 @@ function createStore(options) {
      * instead of overwriting a committed outcome.
      */
     async cancelDelivery(id, organizationId) {
-      const d = state.deliveries.find(
-        (row) => row.id === id && row.organizationId === organizationId && (row.status === 'pending' || row.status === 'retry_scheduled')
-      );
+      const d = state.deliveries.find((row) => row.id === id && row.organizationId === organizationId && (row.status === 'pending' || row.status === 'retry_scheduled'));
       if (!d) return null;
       d.status = 'cancelled';
       d.nextAttemptAt = null;
