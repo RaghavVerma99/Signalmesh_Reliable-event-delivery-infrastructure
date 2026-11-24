@@ -759,8 +759,8 @@ function createApp(deps) {
     });
   }
 
-  // Optional scheduler-driven worker tick, for platforms that cannot run a
-  // long-lived worker (e.g. Vercel + external cron). Disabled unless a token
+  // Optional scheduler-driven worker tick, for deployments that want an
+  // external cron in addition to the in-process loop. Disabled unless a token
   // is configured.
   app.all(
     '/internal/worker-tick',

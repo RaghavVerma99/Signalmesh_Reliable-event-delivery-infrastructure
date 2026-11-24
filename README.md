@@ -121,41 +121,35 @@ Copy `.env.example` to `.env` and adjust. Key variables:
 - `src/server.js` — single process: HTTP API + background worker.
 - `src/app.js` — REST routes, auth, scopes, rate limiting, mock receivers.
 - `src/worker.js` — concurrent claims, signed HTTP POST, retry policy.
-- `src/storage/json.js` — JSON file store used by the demo.
+- `src/storage/json.js` — the only storage backend: atomic file writes with
+  `fsync` + rename, mounted on a durable volume.
 - `scripts/` — seed (`demo:reset`), demo server (`demo:server`), scripted
   demo run (`demo:run`).
 
-## Deploying to Vercel
+## Deployment
 
-`api/index.js` is a serverless API handler; `vercel.json` rewrites **all** public
-paths (`/v1/*`, `/healthz`, `/metrics`, `/dashboard`) to it. Vercel cannot run
-the long-lived delivery worker, so run `npm run start:worker` separately (for
-example as a container) against the same PostgreSQL database.
-
-Required Vercel project environment variables:
-
-- `SIGNALMESH_ENV=production`
-- `SIGNALMESH_STORAGE=postgres`
-- `DATABASE_URL` — pooled/SSL-enabled PostgreSQL connection string
-- `SIGNALMESH_SECRET_ENCRYPTION_KEY` — 32-byte hex (signing-secret encryption)
-- `SIGNALMESH_API_KEY_PEPPER` — 32-byte hex (API-key hashing)
-- `SIGNALMESH_SKIP_MIGRATIONS=true` is set automatically by the handler; schema
-  changes must be applied as a **release step** with `npm run migrate`.
-
-The handler fails fast on Vercel if production storage is not PostgreSQL, so a
-misconfigured preview cannot silently write to an ephemeral JSON file.
-Rate limiting is still per-instance on serverless; apply a shared limit at the
-gateway or database layer if you need a hard tenant-wide cap.
-
-Validate the routing and handler locally without a database:
+SignalMesh runs as one long-lived process (API + worker) with a single durable
+volume. Container image:
 
 ```bash
-npm run vercel:check
+docker compose up --build
 ```
 
-## Demo limitations
+In production set `SIGNALMESH_ENV=production`, a 32-byte hex
+`SIGNALMESH_SECRET_ENCRYPTION_KEY`, `SIGNALMESH_API_KEY_PEPPER`, and an absolute
+`SIGNALMESH_DATA_FILE` on a persistent volume. The process fails fast if any of
+these are missing. See `.env.example` for the full list.
 
-- JSON file store is for the local demo only — it rewrites the whole file on
-  every write and has no cross-process guarantees.
-- Rate limiting is in-process (single instance).
-- The `/dashboard` page is a local demo UI with no auth.
+Serverless platforms are **not supported**: the delivery worker needs a
+long-lived process and the JSON store needs shared, durable local storage.
+For multiple hosts, put a supported shared queue/storage layer in front of the
+service rather than pointing replicas at the same data file.
+
+## Limitations
+
+- The JSON store coordinates a single host only; do not run multiple replicas
+  against one data file.
+- Rate limiting is in-process (single instance). Apply a shared limit at the
+  gateway if you need a hard tenant-wide cap.
+- The `/dashboard` page is a local demo UI with no auth; it is disabled when
+  `SIGNALMESH_ENV=production`.
