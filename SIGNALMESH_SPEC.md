@@ -4,14 +4,24 @@
 
 **Document type:** Product Requirements Document (PRD) + Software
 Requirements Specification (SRS) + Technical Design\
-**Version:** 1.0\
-**Status:** Proposed MVP specification\
-**Primary implementation language:** Go\
-**Database:** PostgreSQL\
-**Deployment target:** Docker Compose for local development;
-containerized Linux deployment for production\
+**Version:** 1.1\
+**Status:** Implemented; see scope note below\
+**Primary implementation language:** Node.js 22+\
+**Storage:** Single-host JSON file store with atomic writes\
+**Deployment target:** Docker Compose / containerized Linux deployment\
 **Audience:** Backend engineers, implementation agents/LLMs, reviewers,
 and contributors
+
+> **Implementation scope note.** This document also contains the original
+> proposed PostgreSQL/outbox architecture (§9 schema definitions, §20.2, and
+> related requirements). That architecture was **not implemented**; the
+> PostgreSQL backend and Vercel deployment were removed. The shipped engine
+> uses `src/storage/json.js` as its only store: writes go to a temp file, are
+> `fsync`ed, then renamed over the data file, and the deliveries table itself
+> is the durable work queue. There is no separate outbox or dispatcher — the
+> spec's `outbox_events` section (§9.9) is historical and explicitly descoped.
+> Where this document says PostgreSQL, read "durable JSON file on one host
+> with a persistent volume" for the implementation.
 
 ------------------------------------------------------------------------
 
@@ -938,11 +948,12 @@ Unique constraint: `(organization_id, operation, idempotency_key)`.
   published_at     TIMESTAMPTZ   Nullable
   created_at       TIMESTAMPTZ   Creation
 
-The outbox is written in the same transaction as the event and initial
-delivery records. A dispatcher or worker safely claims unpublished rows
-and converts them into scheduled delivery work. Avoid having both an
-outbox queue and a separate deliveries queue without a clearly defined
-responsibility for each.
+**Descoped — not implemented.** The shipped engine has no PostgreSQL tables
+and no dispatcher. The `deliveries` records themselves are the durable work
+queue: ingest writes the event and its deliveries in one atomic file write,
+and workers claim due deliveries by lease. Keeping a second outbox queue
+would only introduce dual ownership of the same work. This section is
+retained as historical design context.
 
 ## 9.10 Indexing requirements
 
@@ -1153,7 +1164,7 @@ availability. - Per-endpoint health, with access controls.
 
 Examples: - Oldest pending delivery exceeds a configured threshold. -
 Dead-letter rate rises above baseline. - Worker heartbeat is missing. -
-Database connection pool is exhausted. - Ingestion error rate spikes. -
+Data-file writes fail or disk is full. - Ingestion error rate spikes. -
 One endpoint repeatedly times out or returns 5xx.
 
 ------------------------------------------------------------------------
@@ -1166,9 +1177,9 @@ Use environment variables, with documented defaults.
 SignalMesh_ENV=development
 SignalMesh_HTTP_ADDR=:8080
 
-DATABASE_URL=postgres://SignalMesh:SignalMesh@postgres:5432/SignalMesh?sslmode=disable
-DATABASE_MAX_OPEN_CONNS=20
-DATABASE_MAX_IDLE_CONNS=10
+SIGNALMESH_DATA_FILE=/app/data/db.json
+# Absolute path on a persistent volume; the process fails fast in production
+# if this, the encryption key, or the API-key pepper is missing.
 
 SignalMesh_WORKER_CONCURRENCY=10
 SignalMesh_WORKER_BATCH_SIZE=20
@@ -1233,7 +1244,7 @@ SignalMesh/
 │   │   ├── handlers/
 │   │   └── routes.go
 │   └── storage/
-│       └── postgres/
+│       └── json/
 │
 ├── migrations/
 ├── api/
@@ -1690,17 +1701,17 @@ recommended defaults unless a concrete requirement suggests otherwise.
 
   Decision                          Recommended starting point
   --------------------------------- -------------------------------------------------
-  Database                          PostgreSQL
-  Job queue                         PostgreSQL-backed scheduling
+  Database                          JSON file on one durable host (implemented)
+  Job queue                         Deliveries table with leases (implemented)
   Redis                             Defer until measured need
-  API/worker deployment             Separate processes, shared codebase
+  API/worker deployment             One long-lived process; no serverless
   Delivery guarantee                At-least-once
   Event ordering                    No global ordering guarantee
   Retry policy                      Bounded exponential backoff with jitter
   Redirects                         Disabled
   Production destination protocol   HTTPS only by default
   Signature                         HMAC-SHA256 over timestamp and exact body bytes
-  Event storage                     JSONB with retention controls
+  Event storage                     JSON file with retention sweep
   Dashboard                         Defer until core engine works
   SDK                               Go SDK after stable API contract
   Deployment                        Docker Compose first
