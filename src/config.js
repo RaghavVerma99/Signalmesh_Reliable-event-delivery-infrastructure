@@ -36,6 +36,7 @@ module.exports = {
     enabled: bool('SIGNALMESH_RATE_LIMIT', true),
     perMinute: Math.max(1, int('SIGNALMESH_RATE_LIMIT_PER_MINUTE', 600)),
     burst: Math.max(1, int('SIGNALMESH_RATE_LIMIT_BURST', 120)),
+    idleTtlMs: Math.max(1000, int('SIGNALMESH_RATE_LIMIT_IDLE_TTL_MS', 600000)),
   },
   idempotencyTtlMs: Math.max(0, int('SIGNALMESH_IDEMPOTENCY_TTL_MS', 24 * 60 * 60 * 1000)),
   internalToken: process.env.SIGNALMESH_INTERNAL_TOKEN || null,

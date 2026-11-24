@@ -16,6 +16,7 @@ process.env.SIGNALMESH_ENABLE_DASHBOARD = 'false';
 
 const store = require('../src/store');
 const { createApp } = require('../src/app');
+const { createRateLimiter } = require('../src/ratelimit');
 
 let server;
 let base;
@@ -37,6 +38,15 @@ after(async () => {
   } catch {
     /* ignore */
   }
+});
+
+test('idle buckets are evicted so unique keys cannot grow the map forever', async () => {
+  const check = createRateLimiter({ burst: 1, perMinute: 1, idleTtlMs: 20, sweepIntervalMs: 1 });
+  assert.equal(check('tenant-a').allowed, true);
+  assert.equal(check('tenant-a').allowed, false);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  check('sweep-trigger');
+  assert.equal(check('tenant-a').allowed, true, 'an expired bucket must start with a full allowance');
 });
 
 test('tenant rate limit returns 429 with Retry-After', async () => {

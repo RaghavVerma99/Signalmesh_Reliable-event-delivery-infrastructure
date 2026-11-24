@@ -78,6 +78,12 @@ function createApp(deps) {
   const worker = (deps && deps.worker) || defaultWorker;
 
   const app = express();
+  // Request IDs must exist before the body parser: malformed JSON throws in
+  // express.json(), and the error handler needs an ID to return to the caller.
+  app.use((req, res, next) => {
+    req.id = newRequestId();
+    next();
+  });
   const maxEventBytes = Math.max(1024, parseInt(process.env.SIGNALMESH_MAX_EVENT_BYTES || '262144', 10) || 262144);
   app.use(express.json({ limit: maxEventBytes }));
 
@@ -113,21 +119,40 @@ function createApp(deps) {
     };
   }
 
-  function audit(req, action, resourceType, resourceId, metadata) {
-    return store.appendAudit({
-      organizationId: req.organizationId,
-      actorKeyId: req.key ? req.key.id : null,
-      action,
-      resourceType,
-      resourceId,
-      metadata: metadata || null,
-    });
+  /**
+   * The domain mutation has already committed by the time we write audit
+   * records. An audit failure must not turn that success into a 500; surface
+   * it in the response and logs instead so operators can reconcile later.
+   */
+  async function writeAudit(input, req, res) {
+    try {
+      await store.appendAudit(input);
+      return true;
+    } catch (err) {
+      res.setHeader('X-Audit-Write-Failed', '1');
+      log('error', 'audit_write_failed', {
+        request_id: req.id,
+        action: input.action,
+        error: String(err && err.message ? err.message : err),
+      });
+      return false;
+    }
   }
 
-  app.use((req, res, next) => {
-    req.id = newRequestId();
-    next();
-  });
+  function audit(req, res, action, resourceType, resourceId, metadata) {
+    return writeAudit(
+      {
+        organizationId: req.organizationId,
+        actorKeyId: req.key ? req.key.id : null,
+        action,
+        resourceType,
+        resourceId,
+        metadata: metadata || null,
+      },
+      req,
+      res
+    );
+  }
 
   app.use((req, res, next) => {
     const startAt = Date.now();
@@ -161,21 +186,24 @@ function createApp(deps) {
     '/v1',
     asyncHandler(async (req, res, next) => {
       const isBootstrap = req.method === 'POST' && req.path === '/keys' && (await store.countKeys()) === 0;
-      if (isBootstrap) {
-        req.bootstrap = true;
-        return next();
-      }
-      const authError = await authenticate(req);
-      if (authError) {
-        return res.status(authError.status).json(errorBody(authError.code, authError.message, req.id));
+      // Bootstrap is unauthenticated, so it gets its own per-IP bucket; it
+      // must not be an unlimited way to hammer the key-creation route.
+      let limitKey = 'bootstrap:' + (req.ip || 'unknown');
+      if (!isBootstrap) {
+        const authError = await authenticate(req);
+        if (authError) {
+          return res.status(authError.status).json(errorBody(authError.code, authError.message, req.id));
+        }
+        limitKey = req.organizationId;
       }
       if (config.rateLimit.enabled) {
-        const verdict = limiter(req.organizationId);
+        const verdict = limiter(limitKey);
         if (!verdict.allowed) {
           res.set('Retry-After', String(verdict.retryAfterSeconds));
           return res.status(429).json(errorBody('rate_limited', 'Tenant rate limit exceeded', req.id));
         }
       }
+      if (isBootstrap) req.bootstrap = true;
       return next();
     })
   );
@@ -269,14 +297,18 @@ function createApp(deps) {
       }
       const scopes = normalizeScopes(requestedScopes);
       const created = await store.createKey({ name, organizationId, scopes });
-      await store.appendAudit({
-        organizationId,
-        actorKeyId: req.key ? req.key.id : created.id,
-        action: 'api_key.created',
-        resourceType: 'api_key',
-        resourceId: created.id,
-        metadata: { name: created.name, scopes },
-      });
+      await writeAudit(
+        {
+          organizationId,
+          actorKeyId: req.key ? req.key.id : created.id,
+          action: 'api_key.created',
+          resourceType: 'api_key',
+          resourceId: created.id,
+          metadata: { name: created.name, scopes },
+        },
+        req,
+        res
+      );
       log('info', 'api_key_created', { key_id: created.id, organization_id: organizationId, name: created.name });
       return res.status(201).json({
         key: created,
@@ -301,7 +333,7 @@ function createApp(deps) {
     asyncHandler(async (req, res) => {
       const key = await store.revokeKey(req.params.id, req.organizationId);
       if (!key) return res.status(404).json(errorBody('not_found', 'API key not found', req.id));
-      await audit(req, 'api_key.revoked', 'api_key', key.id, { name: key.name });
+      await audit(req, res, 'api_key.revoked', 'api_key', key.id, { name: key.name });
       log('info', 'api_key_revoked', { key_id: key.id, organization_id: req.organizationId });
       return res.json({ revoked: true, id: key.id, revoked_at: key.revokedAt });
     })
@@ -389,7 +421,7 @@ function createApp(deps) {
 
       metrics.inc('events_accepted_total');
       metrics.inc('deliveries_created_total', deliveries.length);
-      await audit(req, 'event.accepted', 'event', event.id, { event_type: eventType, deliveries_created: deliveries.length });
+      await audit(req, res, 'event.accepted', 'event', event.id, { event_type: eventType, deliveries_created: deliveries.length });
       log('info', 'event_accepted', { event_id: event.id, organization_id: req.organizationId, event_type: eventType, deliveries_created: deliveries.length });
       return res.status(202).json({ event_id: event.id, status: 'accepted', created_at: event.createdAt, deliveries_created: deliveries.length });
     })
@@ -477,7 +509,7 @@ function createApp(deps) {
         updatedAt: nowIso(),
         deletedAt: null,
       });
-      await audit(req, 'endpoint.created', 'endpoint', endpoint.id, { name: endpoint.name, url: endpoint.url });
+      await audit(req, res, 'endpoint.created', 'endpoint', endpoint.id, { name: endpoint.name, url: endpoint.url });
       return res.status(201).json({ endpoint: publicEndpoint(endpoint), signing_secret: signingSecret });
     })
   );
@@ -548,7 +580,7 @@ function createApp(deps) {
       }
       const updated = await store.updateEndpoint(req.params.id, req.organizationId, patch);
       if (!updated) return res.status(404).json(errorBody('not_found', 'Endpoint not found', req.id));
-      await audit(req, 'endpoint.updated', 'endpoint', updated.id, { fields: Object.keys(patch) });
+      await audit(req, res, 'endpoint.updated', 'endpoint', updated.id, { fields: Object.keys(patch) });
       return res.json({ endpoint: publicEndpoint(updated) });
     })
   );
@@ -562,7 +594,7 @@ function createApp(deps) {
       const newSecret = 'whsec_' + crypto.randomBytes(12).toString('hex');
       const updated = await store.rotateEndpointSecret(req.params.id, req.organizationId, encryptSecret(newSecret));
       if (!updated) return res.status(404).json(errorBody('not_found', 'Endpoint not found', req.id));
-      await audit(req, 'endpoint.secret_rotated', 'endpoint', updated.id, {});
+      await audit(req, res, 'endpoint.secret_rotated', 'endpoint', updated.id, {});
       return res.json({
         endpoint: publicEndpoint(updated),
         signing_secret: newSecret,
@@ -577,7 +609,7 @@ function createApp(deps) {
     asyncHandler(async (req, res) => {
       const ep = await store.softDeleteEndpoint(req.params.id, req.organizationId);
       if (!ep) return res.status(404).json(errorBody('not_found', 'Endpoint not found', req.id));
-      await audit(req, 'endpoint.deleted', 'endpoint', ep.id, { name: ep.name });
+      await audit(req, res, 'endpoint.deleted', 'endpoint', ep.id, { name: ep.name });
       return res.json({ deleted: true, id: ep.id });
     })
   );
@@ -683,7 +715,7 @@ function createApp(deps) {
         return res.status(409).json(errorBody('conflict', 'Delivery is not in a replayable state', req.id));
       }
       const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason : null;
-      await audit(req, 'delivery.replayed', 'delivery', original.id, { replay_delivery_id: created.id, reason });
+      await audit(req, res, 'delivery.replayed', 'delivery', original.id, { replay_delivery_id: created.id, reason });
       log('info', 'delivery_replayed', { organization_id: req.organizationId, delivery_id: original.id, replay_delivery_id: created.id, reason });
       return res.status(202).json({ delivery_id: created.id, status: 'pending', replay_of: original.id, reason });
     })
@@ -707,7 +739,7 @@ function createApp(deps) {
         // attempt is scheduled, but never interrupt the HTTP request itself.
         const flagged = await store.requestCancellation(id, req.organizationId);
         if (!flagged) return res.status(409).json(errorBody('conflict', 'Delivery state changed', req.id));
-        await audit(req, 'delivery.cancel_requested', 'delivery', id, { reason });
+        await audit(req, res, 'delivery.cancel_requested', 'delivery', id, { reason });
         return res.json({ delivery_id: id, status: 'processing', cancellation_requested: true });
       }
 
@@ -715,7 +747,7 @@ function createApp(deps) {
       // one step, so a worker cannot overwrite it with its outcome.
       const cancelled = await store.cancelDelivery(id, req.organizationId);
       if (cancelled) {
-        await audit(req, 'delivery.cancelled', 'delivery', id, { reason });
+        await audit(req, res, 'delivery.cancelled', 'delivery', id, { reason });
         return res.json({ delivery_id: id, status: 'cancelled' });
       }
       // Lost a race with the worker; report the current state if terminal.
