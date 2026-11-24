@@ -36,7 +36,6 @@ module.exports = {
   assertProductionConfig,
   host: process.env.HOST || '0.0.0.0',
   port: int('PORT', 8080),
-  role: (process.env.SIGNALMESH_ROLE || 'all').toLowerCase(),
   dataFile: process.env.SIGNALMESH_DATA_FILE || path.join(__dirname, '..', 'data', 'db.json'),
   worker: {
     concurrency: Math.max(1, int('SIGNALMESH_WORKER_CONCURRENCY', 4)),
