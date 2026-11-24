@@ -12,6 +12,5 @@
 /src/storage/      @your-org/signalmesh-maintainers
 /src/worker.js     @your-org/signalmesh-maintainers
 
-# CI and release configuration
+# CI configuration
 /.github/           @your-org/signalmesh-maintainers
-/Dockerfile         @your-org/signalmesh-maintainers

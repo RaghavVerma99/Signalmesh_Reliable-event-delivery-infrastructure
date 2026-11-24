@@ -21,9 +21,7 @@
     "demo:seed": "node scripts/seed.js",
     "demo:server": "node scripts/demo-server.js",
     "demo:run": "node scripts/demo.js",
-    "smoke": "node scripts/smoke.js",
-    "docker:up": "docker compose up --build",
-    "docker:down": "docker compose down -v"
+    "smoke": "node scripts/smoke.js"
   },
   "dependencies": {
     "express": "^4.21.2"

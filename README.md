@@ -111,15 +111,25 @@ rotation path, because changing it invalidates every stored key hash.
 
 ## Deployment
 
+SignalMesh runs directly on a host with Node.js 22+ and a persistent directory.
+Deployment is a single long-lived process; no image or orchestration files are
+provided.
+
 ```bash
-docker compose up --build
+npm ci --omit=dev
+SIGNALMESH_ENV=production \
+SIGNALMESH_DATA_FILE=/var/lib/signalmesh/db.json \
+SIGNALMESH_SECRET_ENCRYPTION_KEY=<32-byte-hex> \
+SIGNALMESH_API_KEY_PEPPER=<32-byte-hex> \
+  npm start
 ```
 
-SignalMesh is one long-lived process with one durable volume. Do not run more
-than one replica against the same data file. Serverless platforms are not
-supported: the worker needs a long-lived process and the JSON store needs
-durable local storage. For multiple hosts, place a shared queue/storage layer
-in front of the service rather than sharing a file.
+Run it under a process supervisor (for example systemd). One process owns the
+data file: do not run multiple replicas or separate API/worker processes
+against it. Serverless platforms are not supported because the worker needs a
+long-lived process and the JSON store needs durable local storage. For multiple
+hosts, place a shared queue/storage layer in front of the service rather than
+sharing a file.
 
 ## Operations
 

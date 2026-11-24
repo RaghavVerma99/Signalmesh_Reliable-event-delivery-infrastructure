@@ -29,7 +29,7 @@ instead.
   API/worker process against the same volume.
 
 The file contains encrypted webhook signing secrets and hashed API keys.
-Backups need the same protection as the live volume.
+Backups need the same protection as the live data directory.
 
 ### Backup
 
@@ -40,10 +40,9 @@ or the new complete file.
 Without snapshots, stop the process cleanly and copy the file:
 
 ```bash
-# On the host running the container
-docker compose stop signalmesh
-cp /var/lib/signalmesh/db.json /var/backups/signalmesh/db.json.<timestamp>
-docker compose start signalmesh
+sudo systemctl stop signalmesh
+sudo cp /var/lib/signalmesh/db.json /var/backups/signalmesh/db.json.<timestamp>
+sudo systemctl start signalmesh
 ```
 
 ### Restore

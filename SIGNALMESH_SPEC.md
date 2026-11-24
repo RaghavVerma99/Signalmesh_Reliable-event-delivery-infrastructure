@@ -8,17 +8,17 @@ Requirements Specification (SRS) + Technical Design\
 **Status:** Implemented; see scope note below\
 **Primary implementation language:** Node.js 22+\
 **Storage:** Single-host JSON file store with atomic writes\
-**Deployment target:** Docker Compose / containerized Linux deployment\
+**Deployment target:** Single Linux host with Node.js 22+ and persistent local storage\
 **Audience:** Backend engineers, implementation agents/LLMs, reviewers,
 and contributors
 
 > **Implementation scope note.** This document also contains the original
 > proposed PostgreSQL/outbox architecture (§9 schema definitions, §20.2, and
 > related requirements). That architecture was **not implemented**; the
-> PostgreSQL backend and Vercel deployment were removed. The shipped engine
-> uses `src/storage/json.js` as its only store: writes go to a temp file, are
-> `fsync`ed, then renamed over the data file, and the deliveries table itself
-> is the durable work queue. There is no separate outbox or dispatcher — the
+> PostgreSQL backend, Vercel deployment and packaged deployment files were
+> removed. The shipped engine uses `src/storage/json.js` as its only store:
+> writes go to a temp file, are `fsync`ed, then renamed over the data file, and
+> the deliveries table itself is the durable work queue. There is no separate outbox or dispatcher — the
 > spec's `outbox_events` section (§9.9) is historical and explicitly descoped.
 > Where this document says PostgreSQL, read "durable JSON file on one host
 > with a persistent volume" for the implementation. For current setup and
@@ -67,7 +67,7 @@ idempotent processing to avoid duplicate business effects.
     guidance.
 8.  Make the system operable through structured logs, metrics, traces,
     and health endpoints.
-9.  Be easy to run locally and self-host using Docker Compose.
+9.  Be easy to run locally and self-host directly on a Node.js host.
 10. Demonstrate production-relevant backend engineering: concurrency,
     transactions, scheduling, fault tolerance, security, and
     observability.
@@ -210,7 +210,7 @@ The MVP must include:
 -   Structured logs.
 -   Prometheus metrics.
 -   Health and readiness endpoints.
--   Docker Compose deployment.
+-   Direct Node.js host deployment.
 -   Unit and integration tests.
 
 ## 4.2 Post-MVP enhancements
@@ -294,13 +294,14 @@ delivery path is correct and tested.
 
 ## 5.2 Recommended deployment topology
 
-For the MVP, use a modular monolith with two executable processes:
+The shipped implementation is a modular monolith in one process:
 
-1.  `SignalMesh-api`: handles public and administrative HTTP requests.
-2.  `SignalMesh-worker`: claims and executes scheduled deliveries.
+1.  The HTTP API handles public and administrative requests.
+2.  The worker claims and executes scheduled deliveries.
 
-Both processes share one PostgreSQL database. They may be deployed as
-separate containers and scaled independently.
+Both run in the same process and share one durable JSON data file. Do not
+run multiple processes against the same file: there is no database server or
+orchestration layer.
 
 This is intentionally not a microservices architecture. A modular
 monolith reduces operational complexity while preserving clear domain
@@ -605,8 +606,9 @@ benchmarks. These are targets, not claims.
 -   Disable redirects by default.
 -   Apply request and response size limits.
 -   Use constant-time signature verification.
--   Apply least privilege to database and container identities.
--   Keep dependencies patched and scan container images.
+-   Run the service as an unprivileged OS user and restrict filesystem
+    permissions on the data file.
+-   Keep dependencies patched and review advisories in CI.
 -   Define a data retention and deletion policy.
 
 ## NFR-007: Observability
@@ -636,12 +638,12 @@ benchmarks. These are targets, not claims.
 
 ## NFR-009: Portability and operability
 
--   Local development must work through Docker Compose.
+-   Local development must work with plain Node.js.
 -   Configuration must be environment-variable driven.
 -   Provide `.env.example` without real secrets.
--   Provide database migration and seed commands.
+-   Provide a seed command.
 -   Document backup and restore procedures.
--   Support Linux containers.
+-   Support Linux hosts.
 
 ## NFR-010: Privacy
 
@@ -1255,8 +1257,6 @@ SignalMesh/
 │   └── go/
 ├── cli/
 ├── dashboard/
-├── deployments/
-│   └── docker/
 ├── docs/
 │   ├── architecture.md
 │   ├── security.md
@@ -1268,8 +1268,6 @@ SignalMesh/
 │   ├── load/
 │   └── fixtures/
 ├── scripts/
-├── docker-compose.yml
-├── Dockerfile
 ├── Makefile
 ├── go.mod
 ├── go.sum
@@ -1297,8 +1295,8 @@ scopes.
 
 ## 16.2 Integration tests
 
-Use a real PostgreSQL instance, preferably through Testcontainers or
-Docker Compose.
+Use the JSON store against a temporary data file so each test run starts
+from clean state.
 
 Test: - Event persistence. - Atomic creation of event, deliveries, and
 outbox rows. - Concurrent idempotency-key requests. - Concurrent job
@@ -1344,12 +1342,12 @@ configuration. Never publish benchmark numbers without methodology.
 
 ## Milestone 0: Project foundation
 
-Deliver: - Go module and repository conventions. - Configuration
-loader. - PostgreSQL Docker Compose service. - Migration framework. -
-Health endpoint. - CI formatting and test workflow.
+Deliver: - Node.js project and repository conventions. - Configuration
+loader. - Local JSON data-file store. - Health endpoint. - CI formatting
+and test workflow.
 
 Done when a new developer can clone the repository and start the API and
-database using documented commands.
+worker with documented commands.
 
 ## Milestone 1: Durable ingestion
 
@@ -1421,7 +1419,7 @@ The MVP is complete only when all of the following are true:
 -   [ ] Tenant isolation is covered by automated tests.
 -   [ ] SSRF protections are implemented and tested.
 -   [ ] Health, readiness, logs, and metrics are available.
--   [ ] Docker Compose starts a working local environment.
+-   [ ] `npm start` starts a working local environment.
 -   [ ] Integration and end-to-end tests pass.
 -   [ ] README explains guarantees, limitations, setup, and example
     integration.
@@ -1654,29 +1652,17 @@ than attempting to ingest every source at once.
     https://grafana.com/docs/\
     Dashboards, alerting, and operational visualization.
 
-## 20.6 Containers, testing and API documentation
+## 20.6 Testing and API documentation
 
-28. **Docker Documentation**\
-    https://docs.docker.com/\
-    Container builds, networking, volumes, and Compose.
-
-29. **Docker Compose Documentation**\
-    https://docs.docker.com/compose/\
-    Local multi-container development environments.
-
-30. **Testcontainers for Go**\
-    https://golang.testcontainers.org/\
-    Integration tests using disposable real dependencies.
-
-31. **Go testing package**\
+28. **Go testing package**\
     https://pkg.go.dev/testing\
     Unit tests, benchmarks, and test helpers.
 
-32. **OpenAPI Specification**\
+29. **OpenAPI Specification**\
     https://spec.openapis.org/oas/latest.html\
     Machine-readable API contract and generated documentation.
 
-33. **GitHub Actions Documentation**\
+30. **GitHub Actions Documentation**\
     https://docs.github.com/en/actions\
     Continuous integration and automated quality checks.
 
@@ -1691,8 +1677,9 @@ than attempting to ingest every source at once.
   Idempotency and retries     15, 16, 17
   Webhook security            19, 20, 21, 23
   Monitoring                  24, 25, 26
-  Deployment and testing      28, 29, 30, 31
-  API contract                32
+  Testing                     28
+  API contract                29
+  CI                          30
 
 ------------------------------------------------------------------------
 
@@ -1716,7 +1703,7 @@ recommended defaults unless a concrete requirement suggests otherwise.
   Event storage                     JSON file with retention sweep
   Dashboard                         Defer until core engine works
   SDK                               Go SDK after stable API contract
-  Deployment                        Docker Compose first
+  Deployment                        Single Node.js host, persistent storage
 
 Additional questions: - Should replay create a new delivery record or a
 new generation linked to the original? - How should endpoint secret
