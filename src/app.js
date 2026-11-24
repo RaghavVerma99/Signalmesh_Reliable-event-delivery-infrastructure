@@ -87,6 +87,17 @@ function createApp(deps) {
     logger[level](msg, fields);
   }
 
+  /** Only heartbeats seen within the freshness window count as live workers. */
+  function freshWorkerHeartbeats(heartbeats, maxAgeMs) {
+    const cutoff = Date.now() - (maxAgeMs || 60000);
+    return (heartbeats || [])
+      .filter((w) => {
+        const seen = Date.parse(w && w.last_seen_at);
+        return Number.isFinite(seen) && seen >= cutoff;
+      })
+      .sort((a, b) => Date.parse(b.last_seen_at) - Date.parse(a.last_seen_at));
+  }
+
   /**
    * Scope gate. Keys were stored with scopes from day one but nothing
    * enforced them, so a "read-only" key could still mutate a tenant.
@@ -188,7 +199,7 @@ function createApp(deps) {
         await store.ping();
         const body = { status: 'ok', service: 'signalmesh', storage: store.kind };
         if (store.listWorkerHeartbeats) {
-          const workers = await store.listWorkerHeartbeats();
+          const workers = freshWorkerHeartbeats(await store.listWorkerHeartbeats(), config.workerHealthMaxAgeMs);
           body.workers = workers.length;
           body.worker_last_seen_at = workers.length ? workers[0].last_seen_at : null;
         }
@@ -206,12 +217,15 @@ function createApp(deps) {
   app.get(
     '/healthz/workers',
     asyncHandler(async (req, res) => {
-      const workers = store.listWorkerHeartbeats ? await store.listWorkerHeartbeats() : [];
+      const heartbeats = store.listWorkerHeartbeats ? await store.listWorkerHeartbeats() : [];
+      const workers = freshWorkerHeartbeats(heartbeats, config.workerHealthMaxAgeMs);
       const body = {
         status: workers.length ? 'ok' : 'unavailable',
         service: 'signalmesh',
         workers: workers.length,
+        stale_workers: heartbeats.length - workers.length,
         worker_last_seen_at: workers.length ? workers[0].last_seen_at : null,
+        max_age_seconds: Math.round((config.workerHealthMaxAgeMs || 60000) / 1000),
       };
       res.status(workers.length ? 200 : 503).json(body);
     })

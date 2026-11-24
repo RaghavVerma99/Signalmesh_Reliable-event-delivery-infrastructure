@@ -237,6 +237,29 @@ test('worker dead-letters a destination that fails the SSRF check', async () => 
   }
 });
 
+test('retention sweep runs even when the queue is idle', async () => {
+  const { store, dataFile } = tempStore();
+  try {
+    await store.init();
+    let sweepCalls = 0;
+    const sweepStore = Object.assign({}, store, {
+      sweepExpired: async () => {
+        sweepCalls += 1;
+        return { idempotencyRemoved: 0, eventsRemoved: 0, deliveriesRemoved: 0, auditRemoved: 0 };
+      },
+    });
+    const worker = createWorker(sweepStore, { workerId: 'w-idle-sweep' });
+    await worker.tick();
+    assert.equal(sweepCalls, 1, 'expired idempotency keys must be released without incoming deliveries');
+  } finally {
+    try {
+      fs.unlinkSync(dataFile);
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
 test('drain waits for an in-flight tick started by the interval', async () => {
   const { store, dataFile } = tempStore();
   try {

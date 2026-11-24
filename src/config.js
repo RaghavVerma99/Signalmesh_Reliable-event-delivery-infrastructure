@@ -30,6 +30,8 @@ module.exports = {
     pollIntervalMs: Math.max(50, int('SIGNALMESH_WORKER_POLL_INTERVAL_MS', 1000)),
     leaseMs: Math.max(1, int('SIGNALMESH_WORKER_LEASE_MS', 15000)),
   },
+  // Heartbeats older than this are treated as dead workers.
+  workerHealthMaxAgeMs: Math.max(1000, int('SIGNALMESH_WORKER_HEALTH_MAX_AGE_MS', 60000)),
   rateLimit: {
     enabled: bool('SIGNALMESH_RATE_LIMIT', true),
     perMinute: Math.max(1, int('SIGNALMESH_RATE_LIMIT_PER_MINUTE', 600)),

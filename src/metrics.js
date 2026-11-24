@@ -40,14 +40,14 @@ function setGauge(key, value) {
 }
 
 function observeDuration(seconds) {
-  let bucket = DURATION_BUCKETS[DURATION_BUCKETS.length - 1];
+  // Prometheus histograms are cumulative: each `le` bucket contains every
+  // observation <= that bound. Incrementing only the single matching bucket
+  // produces non-monotonic counts and meaningless quantiles.
   for (const b of DURATION_BUCKETS) {
     if (seconds <= b) {
-      bucket = b;
-      break;
+      durationBucketCounts[b] = (durationBucketCounts[b] || 0) + 1;
     }
   }
-  durationBucketCounts[bucket] = (durationBucketCounts[bucket] || 0) + 1;
   durationSum.value += seconds;
   durationCount.value += 1;
 }

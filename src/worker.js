@@ -334,18 +334,18 @@ function createWorker(store, options) {
         if (!delivery) break;
         jobs.push(runAttempt(delivery));
       }
-      if (!jobs.length) {
-        metrics.setGauge('worker_active_count', 0);
-        return;
-      }
       metrics.setGauge('worker_active_count', jobs.length);
-      const results = await Promise.allSettled(jobs);
-      for (const r of results) {
-        if (r.status === 'rejected') {
-          logger.error('delivery_attempt_failed', { worker_id: workerId, error: String(r.reason && r.reason.message ? r.reason.message : r.reason) });
+      if (jobs.length) {
+        const results = await Promise.allSettled(jobs);
+        for (const r of results) {
+          if (r.status === 'rejected') {
+            logger.error('delivery_attempt_failed', { worker_id: workerId, error: String(r.reason && r.reason.message ? r.reason.message : r.reason) });
+          }
         }
       }
       metrics.setGauge('worker_active_count', 0);
+      // Retention must not depend on traffic: an idle queue is exactly when
+      // expired idempotency keys and old rows need to be reclaimed.
       await maybeSweep();
     } finally {
       running = false;

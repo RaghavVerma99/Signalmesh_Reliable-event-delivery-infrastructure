@@ -601,7 +601,10 @@ function createStore(options) {
     },
 
     async listWorkerHeartbeats() {
-      return state.worker_heartbeats.slice().sort((a, b) => (a.last_seen_at < b.last_seen_at ? 1 : -1));
+      // Prune on read too: if every worker dies, no further heartbeat writes
+      // happen, so write-time pruning alone would keep stale rows forever.
+      const cutoff = Date.now() - 5 * 60 * 1000;
+      return state.worker_heartbeats.filter((w) => new Date(w.last_seen_at).getTime() >= cutoff).sort((a, b) => (a.last_seen_at < b.last_seen_at ? 1 : -1));
     },
 
     // ---- audit ---------------------------------------------------------
