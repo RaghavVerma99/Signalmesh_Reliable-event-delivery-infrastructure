@@ -18,9 +18,22 @@ function bool(name, fallback) {
 const env = (process.env.SIGNALMESH_ENV || 'development').toLowerCase();
 const isProduction = env === 'production';
 
+/** Fail fast instead of starting a production process with unsafe defaults. */
+function assertProductionConfig() {
+  if (!isProduction) return;
+  const dataFile = process.env.SIGNALMESH_DATA_FILE || path.join(__dirname, '..', 'data', 'db.json');
+  if (!path.isAbsolute(dataFile)) {
+    throw new Error('SIGNALMESH_DATA_FILE must be an absolute path in production');
+  }
+  if (!/^[0-9a-fA-F]{64}$/.test(process.env.SIGNALMESH_API_KEY_PEPPER || '')) {
+    throw new Error('SIGNALMESH_API_KEY_PEPPER must be 32 bytes of hexadecimal in production');
+  }
+}
+
 module.exports = {
   env,
   isProduction,
+  assertProductionConfig,
   host: process.env.HOST || '0.0.0.0',
   port: int('PORT', 8080),
   role: (process.env.SIGNALMESH_ROLE || 'all').toLowerCase(),

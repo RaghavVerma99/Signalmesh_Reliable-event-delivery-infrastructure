@@ -76,6 +76,85 @@ test('decryptSecret accepts legacy plaintext secrets', () => {
   assert.equal(decryptSecret('whsec_legacy_plain'), 'whsec_legacy_plain');
 });
 
+test('secret encryption keys can be rotated without losing stored secrets', () => {
+  const cwd = path.join(__dirname, '..');
+  const keyA = '11'.repeat(32);
+  const keyB = '22'.repeat(32);
+  const run = (key, previous) =>
+    JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          '-e',
+          `
+            const crypto = require('node:crypto');
+            const s = require('./src/security');
+            const stored = s.encryptSecret('whsec_rotate');
+            const iv = crypto.randomBytes(12);
+            const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(process.env.SIGNALMESH_SECRET_ENCRYPTION_KEY, 'hex'), iv);
+            const enc = Buffer.concat([cipher.update('whsec_legacy_enc', 'utf8'), cipher.final()]);
+            const legacy = 'enc:' + Buffer.concat([iv, cipher.getAuthTag(), enc]).toString('base64');
+            process.stdout.write(JSON.stringify({
+              stored,
+              kid: s.secretKeyId(),
+              decrypted: s.decryptSecret(stored),
+              legacy,
+              legacyDecrypted: (() => { try { return s.decryptSecret(legacy); } catch { return null; } })(),
+            }));
+          `,
+        ],
+        {
+          cwd,
+          env: Object.assign({}, process.env, {
+            SIGNALMESH_ENV: 'development',
+            SIGNALMESH_SECRET_ENCRYPTION_KEY: key,
+            SIGNALMESH_SECRET_ENCRYPTION_KEY_PREVIOUS: previous || '',
+          }),
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }
+      ).toString()
+    );
+
+  const before = run(keyA, '');
+  assert.match(before.stored, /^enc:v1:[0-9a-f]{8}:/);
+  assert.equal(before.decrypted, 'whsec_rotate');
+  assert.equal(before.legacyDecrypted, 'whsec_legacy_enc');
+
+  // After rotation, secrets written with either key remain readable.
+  const after = run(keyB, keyA);
+  assert.notEqual(after.kid, before.kid);
+  assert.equal(after.decrypted, 'whsec_rotate');
+  assert.equal(after.legacyDecrypted, 'whsec_legacy_enc');
+
+  // Once the old key leaves the ring, secrets still encrypted with it fail
+  // loudly instead of silently producing invalid signatures.
+  const removed = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        '-e',
+        `
+          const s = require('./src/security');
+          let result;
+          try { result = s.decryptSecret(process.argv[1]); } catch (err) { result = err.message; }
+          process.stdout.write(JSON.stringify({ result }));
+        `,
+        before.stored,
+      ],
+      {
+        cwd,
+        env: Object.assign({}, process.env, {
+          SIGNALMESH_ENV: 'development',
+          SIGNALMESH_SECRET_ENCRYPTION_KEY: keyB,
+          SIGNALMESH_SECRET_ENCRYPTION_KEY_PREVIOUS: '',
+        }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    ).toString()
+  );
+  assert.match(removed.result, /unknown secret key id/);
+});
+
 test('hashApiKey is deterministic and peppered', () => {
   const a = hashApiKey('rel_token_1');
   const b = hashApiKey('rel_token_1');

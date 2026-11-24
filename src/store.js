@@ -5,7 +5,8 @@ const util = require('./util');
 
 // JSON is the only storage backend. It is atomic per write (temp file + fsync
 // + rename) and safe for a single host with a durable volume; it does not
-// coordinate between hosts. Production startup validation lives in config.js.
+// coordinate between hosts. Validate production settings before touching disk.
+config.assertProductionConfig();
 const impl = require('./storage/json').createStore({ dataFile: config.dataFile });
 
 module.exports = impl;

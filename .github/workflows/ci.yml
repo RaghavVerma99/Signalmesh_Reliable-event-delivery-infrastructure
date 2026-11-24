@@ -52,7 +52,7 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
 
   docker:
-    name: Docker build
+    name: Docker image smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,3 +63,21 @@ jobs:
           context: .
           push: false
           tags: signalmesh:ci
+      - name: Start production container
+        run: |
+          docker run -d --name signalmesh-ci -p 8080:8080 \
+            -e SIGNALMESH_ENV=production \
+            -e SIGNALMESH_SECRET_ENCRYPTION_KEY="$(openssl rand -hex 32)" \
+            -e SIGNALMESH_API_KEY_PEPPER="$(openssl rand -hex 32)" \
+            signalmesh:ci
+      - name: Wait for healthz
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then exit 0; fi
+            sleep 1
+          done
+          echo "container never became healthy"
+          exit 1
+      - name: Container logs
+        if: failure()
+        run: docker logs signalmesh-ci

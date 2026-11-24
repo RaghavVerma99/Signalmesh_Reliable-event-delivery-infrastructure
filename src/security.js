@@ -7,9 +7,29 @@ const net = require('net');
 const IS_PRODUCTION = (process.env.SIGNALMESH_ENV || 'development').toLowerCase() === 'production';
 const MAX_RESPONSE_BYTES = Math.max(0, parseInt(process.env.SIGNALMESH_MAX_RESPONSE_BYTES || '16384', 10) || 16384);
 
-const SECRET_ENCRYPTION_KEY_HEX = process.env.SIGNALMESH_SECRET_ENCRYPTION_KEY || '';
-const SECRET_ENCRYPTION_KEY = SECRET_ENCRYPTION_KEY_HEX ? Buffer.from(SECRET_ENCRYPTION_KEY_HEX, 'hex') : null;
 const API_KEY_PEPPER = process.env.SIGNALMESH_API_KEY_PEPPER || '';
+
+function readKey(value, label) {
+  if (!value) return null;
+  if (!/^[0-9a-fA-F]{64}$/.test(value)) {
+    throw new Error(label + ' must be 32 bytes of hexadecimal');
+  }
+  return Buffer.from(value, 'hex');
+}
+
+// Ciphertexts carry a short key ID so the previous key can stay available
+// during rotation instead of making every stored webhook secret unreadable.
+const SECRET_ENCRYPTION_KEY = readKey(process.env.SIGNALMESH_SECRET_ENCRYPTION_KEY || '', 'SIGNALMESH_SECRET_ENCRYPTION_KEY');
+const PREVIOUS_SECRET_ENCRYPTION_KEY = readKey(process.env.SIGNALMESH_SECRET_ENCRYPTION_KEY_PREVIOUS || '', 'SIGNALMESH_SECRET_ENCRYPTION_KEY_PREVIOUS');
+const SECRET_KEYS = new Map();
+if (SECRET_ENCRYPTION_KEY) SECRET_KEYS.set(secretKeyId(SECRET_ENCRYPTION_KEY), SECRET_ENCRYPTION_KEY);
+if (PREVIOUS_SECRET_ENCRYPTION_KEY) SECRET_KEYS.set(secretKeyId(PREVIOUS_SECRET_ENCRYPTION_KEY), PREVIOUS_SECRET_ENCRYPTION_KEY);
+
+function secretKeyId(key) {
+  const chosen = key || SECRET_ENCRYPTION_KEY;
+  if (!chosen) return null;
+  return crypto.createHash('sha256').update(chosen).digest('hex').slice(0, 8);
+}
 
 if (IS_PRODUCTION && !SECRET_ENCRYPTION_KEY) {
   throw new Error('SIGNALMESH_SECRET_ENCRYPTION_KEY is required in production');
@@ -209,7 +229,15 @@ function encryptSecret(plaintext) {
   const cipher = crypto.createCipheriv('aes-256-gcm', SECRET_ENCRYPTION_KEY, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return 'enc:' + Buffer.concat([iv, tag, encrypted]).toString('base64');
+  const payload = Buffer.concat([iv, tag, encrypted]).toString('base64');
+  return 'enc:v1:' + secretKeyId(SECRET_ENCRYPTION_KEY) + ':' + payload;
+}
+
+function decryptWith(key, data) {
+  if (data.length < 28) throw new Error('invalid encrypted secret');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, data.subarray(0, 12));
+  decipher.setAuthTag(data.subarray(12, 28));
+  return Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString('utf8');
 }
 
 function decryptSecret(ciphertextB64) {
@@ -223,16 +251,31 @@ function decryptSecret(ciphertextB64) {
     // Legacy plaintext value stored before encryption was introduced.
     return ciphertextB64;
   }
-  if (!SECRET_ENCRYPTION_KEY) {
-    throw new Error('SIGNALMESH_SECRET_ENCRYPTION_KEY is required to decrypt this secret');
+  const parts = ciphertextB64.split(':');
+  let key;
+  let payload;
+  if (parts[1] === 'v1' && parts.length === 4) {
+    key = SECRET_KEYS.get(parts[2]);
+    if (!key) {
+      throw new Error('unknown secret key id ' + parts[2] + '; set SIGNALMESH_SECRET_ENCRYPTION_KEY_PREVIOUS during rotation');
+    }
+    payload = parts[3];
+  } else {
+    // Legacy `enc:<base64>` written before key IDs were introduced. Try each
+    // configured key because we cannot know which one produced it.
+    payload = parts.slice(1).join(':');
+    const data = Buffer.from(payload, 'base64');
+    for (const candidate of [SECRET_ENCRYPTION_KEY, PREVIOUS_SECRET_ENCRYPTION_KEY]) {
+      if (!candidate) continue;
+      try {
+        return decryptWith(candidate, data);
+      } catch {
+        /* try the next key */
+      }
+    }
+    throw new Error('unable to decrypt secret with any configured key');
   }
-  const data = Buffer.from(ciphertextB64.slice('enc:'.length), 'base64');
-  const iv = data.subarray(0, 12);
-  const tag = data.subarray(12, 28);
-  const encrypted = data.subarray(28);
-  const decipher = crypto.createDecipheriv('aes-256-gcm', SECRET_ENCRYPTION_KEY, iv);
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+  return decryptWith(key, Buffer.from(payload, 'base64'));
 }
 
 function signDelivery(secret, timestamp, body) {
@@ -263,6 +306,7 @@ module.exports = {
   isAllowedAddress,
   createSafeLookup,
   hashApiKey,
+  secretKeyId,
   encryptSecret,
   decryptSecret,
   signDelivery,
