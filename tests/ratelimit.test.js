@@ -7,7 +7,6 @@ const os = require('os');
 const path = require('path');
 
 const dataFile = path.join(os.tmpdir(), 'signalmesh-rl-' + Date.now() + '-' + Math.random().toString(16).slice(2) + '.json');
-process.env.SIGNALMESH_STORAGE = 'json';
 process.env.SIGNALMESH_DATA_FILE = dataFile;
 process.env.SIGNALMESH_RATE_LIMIT = 'true';
 process.env.SIGNALMESH_RATE_LIMIT_PER_MINUTE = '1';
