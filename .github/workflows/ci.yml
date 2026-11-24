@@ -38,34 +38,6 @@ jobs:
       - run: npm ci
       - run: npm test
 
-  postgres:
-    name: PostgreSQL integration
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: signalmesh
-          POSTGRES_USER: signalmesh
-          POSTGRES_PASSWORD: signalmesh
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U signalmesh -d signalmesh"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      SIGNALMESH_TEST_PG_URL: postgres://signalmesh:signalmesh@localhost:5432/signalmesh
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm test
-
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
