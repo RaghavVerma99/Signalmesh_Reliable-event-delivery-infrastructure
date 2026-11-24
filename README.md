@@ -139,9 +139,11 @@ npm start &                   # or npm run demo:server
 npm run smoke                 # end-to-end flow against localhost:8080
 ```
 
-`npm test` runs 63 tests with no skips. `npm run check` also fails if a public
-Express route is missing from `api/openapi.yaml`, or vice versa; demo and
-internal routes are deliberately excluded.
+The test scripts use an explicit quoted glob (`"tests/*.test.js"`): passing a
+bare `tests/` directory to `node --test` fails on Node 22/24 because those
+versions treat arguments as paths, not directories. `npm run check` also fails
+if a public Express route is missing from `api/openapi.yaml`, or vice versa;
+demo and internal routes are deliberately excluded.
 
 ## Limitations and next steps
 
