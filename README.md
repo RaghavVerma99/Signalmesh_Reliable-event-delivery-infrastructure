@@ -96,6 +96,8 @@ Copy `.env.example` to `.env` and adjust. Key variables:
 
 - `SIGNALMESH_SECRET_ENCRYPTION_KEY` - 32-byte hex key for AES-256-GCM
   signing-secret encryption.
+- `SIGNALMESH_SECRET_ENCRYPTION_KEY_PREVIOUS` - old key to keep readable while
+  rotating; remove it once every stored secret has been re-written.
 - `SIGNALMESH_API_KEY_PEPPER` - pepper for keyed API-key hashing.
 - `SIGNALMESH_DELIVERY_TIMEOUT_MS`, `SIGNALMESH_MAX_ATTEMPTS`,
   `SIGNALMESH_RETRY_BASE_DELAY_MS`, `SIGNALMESH_RETRY_MAX_DELAY_MS` -
@@ -125,6 +127,10 @@ Copy `.env.example` to `.env` and adjust. Key variables:
   `fsync` + rename, mounted on a durable volume.
 - `scripts/` — seed (`demo:reset`), demo server (`demo:server`), scripted
   demo run (`demo:run`).
+
+`npm run check` runs lint, formatting, tests, and a drift check that fails if
+an Express route is missing from `api/openapi.yaml` (or vice versa). Demo and
+internal routes are deliberately excluded from the public contract.
 
 ## Deployment
 

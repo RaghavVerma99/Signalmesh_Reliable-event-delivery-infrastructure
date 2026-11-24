@@ -85,7 +85,16 @@ function createApp(deps) {
     next();
   });
   const maxEventBytes = Math.max(1024, parseInt(process.env.SIGNALMESH_MAX_EVENT_BYTES || '262144', 10) || 262144);
-  app.use(express.json({ limit: maxEventBytes }));
+  app.use(
+    express.json({
+      limit: maxEventBytes,
+      // Signatures are over the exact bytes sent by the worker, not a
+      // re-serialized object (which may reorder keys or drop whitespace).
+      verify: (req, res, buf) => {
+        req.rawBody = buf.toString('utf8');
+      },
+    })
+  );
 
   const limiter = createRateLimiter(config.rateLimit);
 
@@ -782,7 +791,7 @@ function createApp(deps) {
       const secrets = rawSecrets.map((value) => decryptSecret(value));
       const sig = String(req.headers['x-signalmesh-signature'] || '');
       const ts = String(req.headers['x-signalmesh-timestamp'] || '');
-      const body = JSON.stringify(req.body);
+      const body = req.rawBody !== undefined ? req.rawBody : JSON.stringify(req.body);
       const ok = secrets.some((secret) => verifyDeliverySignature(secret, ts, sig, body));
       if (!ok) return res.status(401).json({ error: 'invalid_signature' });
       return res.json({ ok: true, received_at: new Date().toISOString() });
