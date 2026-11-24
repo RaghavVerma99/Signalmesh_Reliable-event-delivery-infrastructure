@@ -21,7 +21,9 @@ and contributors
 > is the durable work queue. There is no separate outbox or dispatcher — the
 > spec's `outbox_events` section (§9.9) is historical and explicitly descoped.
 > Where this document says PostgreSQL, read "durable JSON file on one host
-> with a persistent volume" for the implementation.
+> with a persistent volume" for the implementation. For current setup and
+> operational procedures, use `README.md` and `docs/OPERATIONS.md`; this
+> document is retained for design history.
 
 ------------------------------------------------------------------------
 

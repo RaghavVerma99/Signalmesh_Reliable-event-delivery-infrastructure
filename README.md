@@ -1,161 +1,157 @@
 # SignalMesh
 
-A **webhook event delivery engine** — reliable event fan-out with signed
-deliveries, retries, dead-lettering and replay.
+A self-hosted webhook event delivery engine: durable event fan-out, signed
+HTTP deliveries, retries, dead-lettering and replay.
 
-Full design: [`SIGNALMESH_SPEC.md`](./SIGNALMESH_SPEC.md) ·
-API contract: [`api/openapi.yaml`](./api/openapi.yaml)
+- API contract: [`api/openapi.yaml`](./api/openapi.yaml)
+- Production runbook: [`docs/OPERATIONS.md`](./docs/OPERATIONS.md)
+- Design history: [`SIGNALMESH_SPEC.md`](./SIGNALMESH_SPEC.md) — includes a
+  descoped PostgreSQL/outbox design; the shipped engine is JSON-only.
 
-## Core concepts demonstrated
-
-- **Durable before acknowledgement** — an event and its initial deliveries are
-  persisted before `202 Accepted` is returned.
-- **At-least-once delivery** — a delivery may happen more than if a worker dies
-  mid-attempt; receivers deduplicate on `event_id`
-  (`x-signalmesh-event-id` header).
-- **Tenant isolation** — every API key belongs to an organization; all reads and
-  writes are scoped to it. Cross-tenant access returns `404`.
-- **API key auth + scopes** — keys are limited to `events:*`, `endpoints:*`,
-  `deliveries:*`, `keys:*`, `audit:read`; enforced per route.
-- **Signed deliveries** — every outbound request carries
-  `x-signalmesh-signature: v1=HMAC-SHA256(secret, "<timestamp>.<body>")`.
-- **Retries with backoff + jitter** — exponential backoff on
-  network/timeout/408/429/5xx; dead-letter after exhaustion.
-- **Delivery states** — `pending` → `processing` → `succeeded` |
-  `retry_scheduled` | `dead_lettered` | `cancelled`.
-- **Attempt history** — status code, duration, error class and response excerpt
-  for every outbound attempt.
-- **Replay / cancel** — re-drive a dead-lettered or succeeded delivery; cancel a
-  pending one.
-- **Idempotent ingestion** — optional `Idempotency-Key` with TTL + fingerprint
-  conflict detection.
-- **Observability** — structured JSON logs, Prometheus `/metrics`, health
-  endpoints, audit log, keyset cursor pagination, per-tenant rate limiting.
-
-## Run the demo
+## Quick start
 
 ```bash
 npm install
-npm run demo:reset    # seed a clean key + 3 demo endpoints (receiver mocks)
-npm run demo:server   # start with fast-demo retry settings + dashboard
-npm run demo:run      # prove success, retry, dead-letter, replay
+npm run demo:reset    # seed a demo key and three mock receivers
+npm run demo:server   # API + worker, fast retry settings, dashboard enabled
+npm run demo:run      # exercise success, retry, dead-letter and replay
 ```
 
-Open `http://127.0.0.1:8080/dashboard` and paste the API key printed by
-`demo:reset`. If port 8080 is taken, use `PORT=8091` and
+Open `http://127.0.0.1:8080/dashboard` and paste the key printed by
+`demo:reset`. To use another port, set `PORT=8091` and
 `SIGNALMESH_BASE_URL=http://127.0.0.1:8091`.
 
-Server only:
+Run the plain server with `npm start`. It starts one process containing both
+the API and the worker.
 
-```bash
-npm start            # API + worker in one process (JSON file store)
+## How it works
+
+```text
+POST /v1/events
+      |
+      +-- write event + deliveries atomically, then return 202
+              |
+              +-- worker claims a due delivery under a lease
+                      |
+                      +-- sign -> HTTP POST -> record attempt
+                              |
+                              +-- succeeded | retry_scheduled | dead_lettered
 ```
 
-## Manual walkthrough (curl)
+- **Durable before acknowledgement.** A `202` is only returned after the event
+  and its initial deliveries are on disk.
+- **At-least-once delivery.** A delivery can repeat if a worker dies mid-attempt.
+  Receivers deduplicate on `x-signalmesh-event-id`.
+- **Signed requests.** Each POST carries `x-signalmesh-timestamp` and
+  `x-signalmesh-signature: v1=HMAC-SHA256(secret, "<timestamp>.<raw body>")`.
+- **Retries.** Network errors, timeouts, 408, 429 and 5xx use bounded
+  exponential backoff with jitter; exhaustion dead-letters the delivery.
+- **Replay and cancel.** Replay is allowed only for `succeeded` or
+  `dead_lettered` deliveries. Cancel stops a pending or retry-scheduled
+  delivery; an in-flight attempt is flagged `cancel_requested` and is not
+  retried. `cancelled` deliveries cannot be replayed.
+- **Idempotency.** An optional `Idempotency-Key` deduplicates ingestion and
+  rejects a reused key with a different payload fingerprint.
+- **Tenant isolation.** Keys belong to an organization; all reads and writes
+  are scoped to it, with scopes enforced per route.
 
-1. Create a key (bootstrap — only works while zero keys exist):
+## API
+
+All `/v1` routes require `Authorization: Bearer <KEY>` except the bootstrap
+`POST /v1/keys`, which works only while no key exists. Error bodies have the
+shape `{"error":{"code","message","request_id"}}`.
+
+| Area       | Routes                                                                                   |
+| ---------- | ---------------------------------------------------------------------------------------- |
+| Keys       | `POST/GET /v1/keys`, `POST /v1/keys/:id/revoke`                                              |
+| Events     | `POST /v1/events`, `GET /v1/events`                                                          |
+| Endpoints  | `POST/GET /v1/endpoints`, `GET/PATCH/DELETE /v1/endpoints/:id`, `POST .../rotate-secret`      |
+| Deliveries | `GET /v1/deliveries`, `GET /v1/deliveries/:id`, `.../attempts`, `.../replay`, `.../cancel`    |
+| Audit      | `GET /v1/audit`                                                                              |
+| Operations | `GET /healthz`, `/readyz`, `/healthz/workers`, `/metrics`                                    |
+
+See `api/openapi.yaml` for request bodies, response codes and pagination.
+
+A minimal flow:
 
 ```bash
-curl -X POST localhost:8080/v1/keys -H 'Content-Type: application/json' -d '{"name":"demo"}'
-```
+KEY=$(curl -s -X POST localhost:8080/v1/keys \
+  -H 'Content-Type: application/json' -d '{"name":"demo"}' | node -pe 'JSON.parse(require("fs").readFileSync(0)).key.key')
 
-2. Create a webhook endpoint pointing at a mock receiver:
-
-```bash
 curl -X POST localhost:8080/v1/endpoints \
-  -H 'Authorization: Bearer <KEY>' -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d '{"name":"orders","url":"http://127.0.0.1:8080/demo/orders","event_types":["order.created"]}'
-```
 
-3. Send an event:
-
-```bash
 curl -X POST localhost:8080/v1/events \
-  -H 'Authorization: Bearer <KEY>' -H 'Content-Type: application/json' -H 'Idempotency-Key: order-1' \
-  -d '{"event_type":"order.created","data":{"order_id":"ord_789","amount":2500}}'
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: order-1' \
+  -d '{"event_type":"order.created","data":{"order_id":"ord_789"}}'
 ```
 
-4. Wait ~5s, then check delivery status:
-
-```bash
-curl localhost:8080/v1/deliveries?status=succeeded -H 'Authorization: Bearer <KEY>'
-```
-
-5. Failure paths:
-
-- flaky: endpoint -> `/demo/orders-flaky` -> first attempt 500, retry -> succeeded
-- down: endpoint -> `/demo/orders-down` -> dead_lettered after retries
-- replay: `POST /v1/deliveries/:id/replay` with a reason
-
-For fast dead-lettering in a manual run, set `SIGNALMESH_MAX_ATTEMPTS=3` and
-`SIGNALMESH_RETRY_MAX_DELAY_MS=30000` (the demo server script already does).
+For fast dead-lettering locally, use `SIGNALMESH_MAX_ATTEMPTS=3` and
+`SIGNALMESH_RETRY_MAX_DELAY_MS=30000` (already set by `npm run demo:server`).
 
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust. Key variables:
+Copy `.env.example` to `.env` and adjust it. Production requires:
 
-- `SIGNALMESH_SECRET_ENCRYPTION_KEY` - 32-byte hex key for AES-256-GCM
-  signing-secret encryption.
-- `SIGNALMESH_SECRET_ENCRYPTION_KEY_PREVIOUS` - old key to keep readable while
-  rotating; remove it once every stored secret has been re-written.
-- `SIGNALMESH_API_KEY_PEPPER` - pepper for keyed API-key hashing.
-- `SIGNALMESH_DELIVERY_TIMEOUT_MS`, `SIGNALMESH_MAX_ATTEMPTS`,
-  `SIGNALMESH_RETRY_BASE_DELAY_MS`, `SIGNALMESH_RETRY_MAX_DELAY_MS` -
-  delivery/retry policy.
-- `SIGNALMESH_WORKER_CONCURRENCY`, `SIGNALMESH_WORKER_POLL_INTERVAL_MS` -
-  worker tuning.
-- `SIGNALMESH_LOG_LEVEL` - `debug` | `info` | `warn` | `error` | `silent`.
+- `SIGNALMESH_ENV=production`
+- `SIGNALMESH_DATA_FILE` — absolute path on a persistent volume
+- `SIGNALMESH_SECRET_ENCRYPTION_KEY` — 32-byte hex key for signing secrets
+- `SIGNALMESH_API_KEY_PEPPER` — 32-byte hex pepper for API-key hashes
 
-## Architecture
+The process fails fast if any of these are missing or invalid. Other settings
+cover retries, worker concurrency, rate limits, idempotency TTL, retention and
+logging; see `.env.example` for the full list. `SIGNALMESH_ROLE` no longer
+exists: there is one process, not separate API and worker deployments.
 
-```
-                 POST /v1/events
-                       |
-            persist event + deliveries          (durable, then 202)
-                       |
-             worker: claim -> sign -> POST     (backoff + jitter on failure)
-                       |
-        succeeded | retry_scheduled | dead_lettered
-                       |
-        POST /v1/deliveries/:id/replay  (re-drive)
-```
-
-- `src/server.js` — single process: HTTP API + background worker.
-- `src/app.js` — REST routes, auth, scopes, rate limiting, mock receivers.
-- `src/worker.js` — concurrent claims, signed HTTP POST, retry policy.
-- `src/storage/json.js` — the only storage backend: atomic file writes with
-  `fsync` + rename, mounted on a durable volume.
-- `scripts/` — seed (`demo:reset`), demo server (`demo:server`), scripted
-  demo run (`demo:run`).
-
-`npm run check` runs lint, formatting, tests, and a drift check that fails if
-an Express route is missing from `api/openapi.yaml` (or vice versa). Demo and
-internal routes are deliberately excluded from the public contract.
+Secret-key rotation uses `SIGNALMESH_SECRET_ENCRYPTION_KEY_PREVIOUS`; see
+[`docs/OPERATIONS.md`](./docs/OPERATIONS.md). The API-key pepper has no
+rotation path, because changing it invalidates every stored key hash.
 
 ## Deployment
-
-SignalMesh runs as one long-lived process (API + worker) with a single durable
-volume. Container image:
 
 ```bash
 docker compose up --build
 ```
 
-In production set `SIGNALMESH_ENV=production`, a 32-byte hex
-`SIGNALMESH_SECRET_ENCRYPTION_KEY`, `SIGNALMESH_API_KEY_PEPPER`, and an absolute
-`SIGNALMESH_DATA_FILE` on a persistent volume. The process fails fast if any of
-these are missing. See `.env.example` for the full list.
+SignalMesh is one long-lived process with one durable volume. Do not run more
+than one replica against the same data file. Serverless platforms are not
+supported: the worker needs a long-lived process and the JSON store needs
+durable local storage. For multiple hosts, place a shared queue/storage layer
+in front of the service rather than sharing a file.
 
-Serverless platforms are **not supported**: the delivery worker needs a
-long-lived process and the JSON store needs shared, durable local storage.
-For multiple hosts, put a supported shared queue/storage layer in front of the
-service rather than pointing replicas at the same data file.
+## Operations
 
-## Limitations
+Health, metrics, backup/restore, key rotation, retention and alerting are
+documented in [`docs/OPERATIONS.md`](./docs/OPERATIONS.md).
 
-- The JSON store coordinates a single host only; do not run multiple replicas
-  against one data file.
-- Rate limiting is in-process (single instance). Apply a shared limit at the
-  gateway if you need a hard tenant-wide cap.
-- The `/dashboard` page is a local demo UI with no auth; it is disabled when
-  `SIGNALMESH_ENV=production`.
+In short: alert on `/healthz/workers`, which returns 503 when no heartbeat is
+fresh; use `/readyz` for storage readiness; scrape `/metrics` for Prometheus
+data. Audit write failures are logged and returned with
+`X-Audit-Write-Failed: 1`, but are not automatically retried.
+
+## Verification
+
+```bash
+npm run check                 # lint, formatting, tests, OpenAPI route-drift check
+npm start &                   # or npm run demo:server
+npm run smoke                 # end-to-end flow against localhost:8080
+```
+
+`npm test` runs 63 tests with no skips. `npm run check` also fails if a public
+Express route is missing from `api/openapi.yaml`, or vice versa; demo and
+internal routes are deliberately excluded.
+
+## Limitations and next steps
+
+- The JSON store coordinates a single host only.
+- Rate limiting is in-process; use a gateway for a hard multi-instance cap.
+- `/dashboard` is an unauthenticated demo UI, disabled in production.
+- Request signatures bind a timestamp, but neither the engine nor the mock
+  receiver enforces a freshness window. Consumers must reject old timestamps.
+- Backup/restore is a filesystem operation (see the runbook), not a CLI command.
+- Audit failures are signalled but not queued for retry.
+
+Prioritized next work: receiver timestamp-skew enforcement, a tested
+backup/restore command, and release automation (CHANGELOG, tag, image publish).
